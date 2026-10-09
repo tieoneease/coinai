@@ -1,18 +1,26 @@
 package dev.coinai
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.text.format.DateUtils
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,17 +29,23 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -40,33 +54,31 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import dev.coinai.app.CoinaiApp
+import dev.coinai.ble.CoinPairing
+import dev.coinai.clips.ClipRecord
+import dev.coinai.clips.ClipState
+import dev.coinai.clips.PlainText
+import dev.coinai.clips.ProcessingSettings
 import dev.coinai.sambot.SambotClient
+import dev.coinai.settings.DeviceStatus
 import dev.coinai.settings.SambotSettings
-import dev.coinai.settings.SambotSettingsStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
+import java.io.File
 import java.io.IOException
-import java.util.concurrent.TimeUnit
-
-/** One OkHttp client (connection pool, dispatcher) for the whole app. */
-object Http {
-    val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .build()
-    }
-}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val store = SambotSettingsStore(this)
+        val app = application as CoinaiApp
         setContent {
             CoinaiTheme {
-                MainScreen(store)
+                MainScreen(app)
             }
         }
     }
@@ -82,27 +94,172 @@ private fun CoinaiTheme(content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScreen(store: SambotSettingsStore) {
+private fun MainScreen(app: CoinaiApp) {
+    val clips by app.clips.clips.collectAsState(initial = emptyList())
+    val player = rememberPlayer()
     Scaffold(topBar = { TopAppBar(title = { Text("coinai") }) }) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(padding),
         ) {
-            StatusCard()
-            SambotSection(store)
+            item { CoinCard(app) }
+            item { Text("Clips", style = MaterialTheme.typography.titleMedium) }
+            if (clips.isEmpty()) item { Text("No clips yet.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            items(clips, key = { it.id }) { clip -> ClipRow(app, clip, player) }
+            item { SambotSection(app) }
+            item { ProcessingSection(app) }
+        }
+    }
+}
+
+/** One ExoPlayer for the screen, playing at most one clip. */
+private class ClipPlayer(val exo: ExoPlayer) {
+    var playingId by mutableLongStateOf(-1L)
+
+    fun toggle(clip: ClipRecord) {
+        if (playingId == clip.id) {
+            exo.stop()
+            playingId = -1
+            return
+        }
+        val path = clip.filePath ?: return
+        exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
+        exo.prepare()
+        exo.play()
+        playingId = clip.id
+    }
+}
+
+@Composable
+private fun rememberPlayer(): ClipPlayer {
+    val context = LocalContext.current
+    val player = remember { ClipPlayer(ExoPlayer.Builder(context).build()) }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) player.playingId = -1
+            }
+        }
+        player.exo.addListener(listener)
+        onDispose {
+            player.exo.removeListener(listener)
+            player.exo.release()
+        }
+    }
+    return player
+}
+
+@Composable
+private fun CoinCard(app: CoinaiApp) {
+    val context = LocalContext.current
+    val status by app.settings.deviceStatus.collectAsState(initial = null)
+    var associations by remember { mutableIntStateOf(CoinPairing.associations(context).size) }
+    var pairNote by remember { mutableStateOf<String?>(null) }
+
+    val chooser = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) pairNote = "Pairing cancelled"
+    }
+    val startPairing = {
+        pairNote = "Looking for coins…"
+        CoinPairing.associate(
+            context,
+            context.mainExecutor,
+            launch = { chooser.launch(IntentSenderRequest.Builder(it).build()) },
+            onAssociated = {
+                associations = CoinPairing.associations(context).size
+                pairNote = "Paired. Enter the code the coin shows when Android asks for it."
+            },
+            onError = { pairNote = "Pairing failed: $it" },
+        )
+    }
+    val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted[Manifest.permission.BLUETOOTH_CONNECT] == true) startPairing()
+        else pairNote = "Pairing needs the Nearby devices permission"
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Coin", style = MaterialTheme.typography.titleMedium)
+            val s = status
+            if (s == null) {
+                Text(if (associations == 0) "No coin paired." else "Paired. Waiting for the coin's first sync.")
+            } else {
+                StatusLines(s)
+            }
+            Button(
+                enabled = CoinPairing.isSupported(context),
+                onClick = {
+                    val needed = listOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.POST_NOTIFICATIONS)
+                        .filter { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                    if (needed.isEmpty()) startPairing() else permissions.launch(needed.toTypedArray())
+                },
+            ) { Text(if (associations == 0) "Pair coin" else "Pair another coin") }
+            pairNote?.let { Text(it, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
         }
     }
 }
 
 @Composable
-private fun StatusCard() {
+private fun StatusLines(s: DeviceStatus) {
+    val battery = if (s.batteryKnown) "${s.batteryPct}%" else "unknown"
+    val power = when {
+        s.charging -> ", charging"
+        s.usbPower -> ", on USB"
+        else -> ""
+    }
+    Text("Battery $battery$power")
+    Text(if (s.pending == 1) "1 clip waiting on the coin" else "${s.pending} clips waiting on the coin")
+    if (s.recording) Text("Recording")
+    Text(
+        "Last sync ${DateUtils.getRelativeTimeSpanString(s.atMs)} · firmware ${s.fwVersion}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private fun ClipState.label(): String = when (this) {
+    ClipState.RECEIVING -> "Receiving"
+    ClipState.RECEIVED -> "Received"
+    ClipState.TRANSCRIBED -> "Transcribed"
+    ClipState.PROMPTED -> "Sent to SamBot"
+    ClipState.REPLIED -> "Replied"
+    ClipState.NO_SPEECH -> "No speech"
+    ClipState.UNCERTAIN -> "Unknown if SamBot got it"
+    ClipState.FAILED -> "Failed"
+}
+
+@Composable
+private fun ClipRow(app: CoinaiApp, clip: ClipRecord, player: ClipPlayer) {
+    val scope = rememberCoroutineScope()
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Status", style = MaterialTheme.typography.titleMedium)
-            Text("No coin paired. Pairing, battery, last sync and pending clips arrive with Bluetooth support.")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "#${clip.clipId} · ${clip.state.label()}",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                clip.durationMs?.let { Text("%.1f s".format(it / 1000.0), style = MaterialTheme.typography.bodySmall) }
+            }
+            (clip.startedAtMs ?: clip.receivedAtMs)?.let {
+                Text(
+                    DateUtils.getRelativeTimeSpanString(it).toString(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            clip.transcript?.takeIf { it.isNotBlank() }?.let { Text("“$it”") }
+            clip.reply?.let { Text(PlainText.fromMarkdown(it), maxLines = 6) }
+            clip.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (clip.filePath != null) {
+                    TextButton(onClick = { player.toggle(clip) }) { Text(if (player.playingId == clip.id) "Stop" else "Play") }
+                }
+                if (clip.state.resendable) {
+                    TextButton(onClick = { scope.launch { app.resend(clip.id) } }) { Text("Resend") }
+                }
+            }
         }
     }
 }
@@ -114,7 +271,7 @@ private sealed interface TestState {
 }
 
 @Composable
-private fun SambotSection(store: SambotSettingsStore) {
+private fun SambotSection(app: CoinaiApp) {
     val scope = rememberCoroutineScope()
     var loaded by rememberSaveable { mutableStateOf(false) }
     var baseUrl by rememberSaveable { mutableStateOf("") }
@@ -124,7 +281,7 @@ private fun SambotSection(store: SambotSettingsStore) {
 
     LaunchedEffect(Unit) {
         if (!loaded) {
-            val stored = store.settings.first()
+            val stored = app.settings.sambot.first()
             baseUrl = stored.baseUrl
             token = stored.token
             loaded = true
@@ -158,7 +315,7 @@ private fun SambotSection(store: SambotSettingsStore) {
                     enabled = loaded,
                     onClick = {
                         scope.launch {
-                            store.save(SambotSettings(baseUrl, token))
+                            app.settings.saveSambot(SambotSettings(baseUrl, token))
                             savedNote = "Saved"
                         }
                     },
@@ -168,7 +325,7 @@ private fun SambotSection(store: SambotSettingsStore) {
                     onClick = {
                         scope.launch {
                             test = TestState.Running
-                            test = testConnection(baseUrl, token)
+                            test = testConnection(app, baseUrl, token)
                         }
                     },
                 ) { Text("Test connection") }
@@ -190,8 +347,40 @@ private fun SambotSection(store: SambotSettingsStore) {
     }
 }
 
-private suspend fun testConnection(baseUrl: String, token: String): TestState.Done = try {
-    val client = SambotClient(baseUrl, token, Http.client)
+@Composable
+private fun ProcessingSection(app: CoinaiApp) {
+    val scope = rememberCoroutineScope()
+    val stored by app.settings.voicedThresholdMs.collectAsState(initial = null)
+    var text by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(stored) { if (text == null && stored != null) text = stored.toString() }
+    val value = text?.toLongOrNull()
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Processing", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(
+                value = text.orEmpty(),
+                onValueChange = { text = it.filter(Char::isDigit).take(6) },
+                label = { Text("Minimum speech (ms)") },
+                supportingText = {
+                    Text("Clips with less voiced audio are not sent. Default ${ProcessingSettings.DEFAULT_VOICED_THRESHOLD_MS} ms.")
+                },
+                isError = text != null && value == null,
+                singleLine = true,
+                enabled = stored != null,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                enabled = value != null && value != stored,
+                onClick = { value?.let { scope.launch { app.settings.saveVoicedThreshold(it) } } },
+            ) { Text("Save") }
+        }
+    }
+}
+
+private suspend fun testConnection(app: CoinaiApp, baseUrl: String, token: String): TestState.Done = try {
+    val client = SambotClient(baseUrl, token, app.http)
     if (client.health()) TestState.Done("Connected: /health answered ok", ok = true)
     else TestState.Done("/health answered, but not ok", ok = false)
 } catch (e: IllegalArgumentException) {
