@@ -19,6 +19,7 @@ import okio.BufferedSink
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -213,7 +214,7 @@ class SambotClientTest {
     @Test
     fun eventStreamHttpErrorThrowsWithoutPrompting() {
         eventsResponse = { json(401, """{"error":"bad token"}""") }
-        val e = assertThrows(SambotException::class.java) { runBlocking { client.ask("hi") } }
+        val e = assertThrows(PromptNotSentException::class.java) { runBlocking { client.ask("hi") } }
         assertEquals(401, e.status)
         assertTrue(e.message!!, e.message!!.contains("bad token"))
         assertEquals(0, promptCalls.get())
@@ -229,6 +230,22 @@ class SambotClientTest {
         val e = assertThrows(SambotException::class.java) { runBlocking { client.ask("hi") } }
         assertEquals("agent is not running", e.message)
         assertEquals(409, e.status)
+        assertFalse(e is PromptOutcomeUnknownException || e is PromptNotSentException)
+    }
+
+    @Test
+    fun prompt5xxOrUnreadableAnswerHasAnUnknownOutcome() {
+        events = { sse ->
+            sse.send(LIVE)
+            sse.stall()
+        }
+        promptResponse = json(502, """{"error":"upstream timeout"}""")
+        val e = assertThrows(PromptOutcomeUnknownException::class.java) { runBlocking { client.ask("hi") } }
+        assertTrue(e.message!!, e.message!!.contains("upstream timeout"))
+
+        promptResponse = MockResponse.Builder().code(200).body("<html>proxy</html>").build()
+        assertThrows(PromptOutcomeUnknownException::class.java) { runBlocking { client.ask("hi") } }
+        assertEquals(2, promptCalls.get())
     }
 
     @Test

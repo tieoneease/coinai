@@ -42,6 +42,15 @@ open class SambotException(message: String, val status: Int? = null, cause: Thro
  */
 class PromptOutcomeUnknownException(message: String, cause: Throwable? = null) : SambotException(message, null, cause)
 
+/** [SambotClient.ask] failed before `POST /prompt` was sent, so retrying cannot duplicate the prompt. */
+class PromptNotSentException(message: String, status: Int? = null, cause: Throwable? = null) : SambotException(message, status, cause)
+
+/** The SamBot calls the clip pipeline makes; [SambotClient] implements it. */
+interface SambotApi {
+    suspend fun transcribe(ogg: ByteArray): String
+    suspend fun ask(text: String, lane: String = "web", timeout: Duration = 5.minutes, onDelta: ((String) -> Unit)? = null): AskResult
+}
+
 /** [partial] is true when the reply ended by timeout or stream failure instead of `agent_settled`. */
 data class AskResult(val text: String, val steered: Boolean, val partial: Boolean)
 
@@ -53,7 +62,7 @@ data class AskResult(val text: String, val steered: Boolean, val partial: Boolea
  * Redirects are never followed: the proxy redirects an unauthenticated request to its login page,
  * and that surfaces here as a [SambotException] instead of a confusing HTML 200.
  */
-class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkHttpClient) {
+class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkHttpClient) : SambotApi {
     private val base: HttpUrl = requireNotNull(baseUrl.trim().toHttpUrlOrNull()) { "not an http(s) URL: $baseUrl" }
     private val http: OkHttpClient = okHttpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
     /** The event stream stays open for a whole turn; [ask]'s own timeout bounds it instead. */
@@ -71,7 +80,7 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
     }
 
     /** `POST /voice/transcribe` with the clip unchanged; returns the transcript. */
-    suspend fun transcribe(ogg: ByteArray): String = withContext(Dispatchers.IO) {
+    override suspend fun transcribe(ogg: ByteArray): String = withContext(Dispatchers.IO) {
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("audio", "clip.ogg", ogg.toRequestBody(OGG))
@@ -95,11 +104,11 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
      * was sent throws [SambotException]; a prompt with an unknown outcome throws
      * [PromptOutcomeUnknownException]. [onDelta] runs in the caller's context with each chunk.
      */
-    suspend fun ask(
+    override suspend fun ask(
         text: String,
-        lane: String = "web",
-        timeout: Duration = 5.minutes,
-        onDelta: ((String) -> Unit)? = null,
+        lane: String,
+        timeout: Duration,
+        onDelta: ((String) -> Unit)?,
     ): AskResult = coroutineScope {
         val eventsCall = streamHttp.newCall(
             request(url("events").newBuilder().addQueryParameter("lane", lane).build())
@@ -140,7 +149,7 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
             reader.cancel()
         }
         when (stage) {
-            Stage.AWAITING_LIVE -> throw SambotException("timed out after $timeout waiting for $HOST_STREAM_LIVE; prompt not sent")
+            Stage.AWAITING_LIVE -> throw PromptNotSentException("timed out after $timeout waiting for $HOST_STREAM_LIVE; prompt not sent")
             Stage.PROMPTING -> throw PromptOutcomeUnknownException("timed out after $timeout during POST /prompt")
             Stage.COLLECTING -> AskResult(reply.toString().trim(), steered, partial = !settled) // trimmed like the reference client
         }
@@ -157,8 +166,17 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         }
         response.use {
             if (it.code == 409) throw SambotException("agent is not running", 409)
+            // A 5xx (typically the proxy) or an unreadable 2xx says nothing reliable about whether
+            // SamBot took the prompt; only a 4xx is a clear refusal.
+            if (it.code >= 500) {
+                throw PromptOutcomeUnknownException(it.failure("POST /prompt").message ?: "POST /prompt: HTTP ${it.code}")
+            }
             if (!it.isSuccessful) throw it.failure("POST /prompt")
-            val parsed = it.decode<PromptResponse>("POST /prompt")
+            val parsed = try {
+                it.decode<PromptResponse>("POST /prompt")
+            } catch (e: SambotException) {
+                throw PromptOutcomeUnknownException(e.message ?: "POST /prompt: unreadable answer", e)
+            }
             if (!parsed.ok) throw SambotException("POST /prompt answered ok=false", it.code)
             parsed
         }
@@ -196,9 +214,9 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
     }
 
     private fun beforePromptFailure(cause: Throwable?): SambotException = when (cause) {
-        is SambotException -> cause
-        null -> SambotException("event stream ended before $HOST_STREAM_LIVE; prompt not sent")
-        else -> SambotException("event stream failed before $HOST_STREAM_LIVE; prompt not sent: ${cause.message}", cause = cause)
+        is SambotException -> PromptNotSentException(cause.message ?: "GET /events failed", cause.status, cause)
+        null -> PromptNotSentException("event stream ended before $HOST_STREAM_LIVE; prompt not sent")
+        else -> PromptNotSentException("event stream failed before $HOST_STREAM_LIVE; prompt not sent: ${cause.message}", cause = cause)
     }
 
     private fun url(path: String): HttpUrl = base.newBuilder().addPathSegments(path).build()
