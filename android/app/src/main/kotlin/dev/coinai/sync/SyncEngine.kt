@@ -297,11 +297,11 @@ class SyncEngine(
             withContext(io) { a.sync(); a.close() }
             current = null
             val now = clock()
-            // PROTOCOL-Q: rule 4 corrects the start as receive time minus duration, which is only
-            // right for a clip fetched as it ends. LIST_RESULT carries no time and CLIP_STARTED
-            // is only seen live, so a clip recorded before this visit gets a start time that is
-            // too late. Kept as specified; a start_utc_ms in LIST_RESULT entries would fix it.
-            val started = startTimes[m.clip]?.takeIf { it != 0L } ?: (now - m.durationMs)
+            // PROTOCOL.md rule 4: CLIP_ENDED carries the start time when the coin knew the time
+            // while recording; otherwise receive time minus duration is the estimate.
+            val started = m.startUtcMs.takeIf { it != 0L }
+                ?: startTimes[m.clip]?.takeIf { it != 0L }
+                ?: (now - m.durationMs)
             val clip = store.commitReceived(t.record, m, startedAtMs = started, receivedAtMs = now)
             received += clip
             listener.onClipReceived(clip)

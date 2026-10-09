@@ -32,7 +32,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * Fault knobs model what the radio and Android can do to a transfer.
  */
 class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: String = "C0:A1:00:00:00:01") : CoinLink {
-    class Clip(val id: Int, initial: ByteArray, var complete: Boolean, val durationMs: Long, val voicedMs: Long) {
+    class Clip(val id: Int, initial: ByteArray, var complete: Boolean, val durationMs: Long, val voicedMs: Long, val startUtcMs: Long = 0) {
         private val buf = ByteArrayOutputStream().apply { write(initial) }
         @get:Synchronized val size: Long get() = buf.size().toLong()
         @Synchronized fun append(bytes: ByteArray) = buf.write(bytes)
@@ -81,8 +81,8 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     private var streams = 0
     private var packetsThisConnection = 0
 
-    fun addClip(id: Int, bytes: ByteArray, complete: Boolean = true, durationMs: Long = 3000, voicedMs: Long = 2000): Clip =
-        Clip(id, bytes, complete, durationMs, voicedMs).also { clips[id] = it }
+    fun addClip(id: Int, bytes: ByteArray, complete: Boolean = true, durationMs: Long = 3000, voicedMs: Long = 2000, startUtcMs: Long = 0): Clip =
+        Clip(id, bytes, complete, durationMs, voicedMs, startUtcMs).also { clips[id] = it }
 
     fun reconnect() {
         packetsThisConnection = 0
@@ -182,7 +182,7 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
                 }
             }
             held?.let(::emitData)
-            emit(CtrlMessage.ClipEnded(clip.id, clip.size, clip.durationMs, clip.crc(), clip.voicedMs))
+            emit(CtrlMessage.ClipEnded(clip.id, clip.size, clip.durationMs, clip.crc(), clip.voicedMs, clip.startUtcMs))
         }
     }
 }

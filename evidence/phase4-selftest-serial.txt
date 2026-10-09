@@ -1,0 +1,12 @@
+# scripts/bletest.py --serial COM9 selftest, firmware 0e55f99+ (2026-10-09)
+PASS  LIST pages of at most 34  - 36 clips in messages of [34, 2]
+PASS  GET unknown clip -> ERROR 1
+PASS  GET past the end -> ERROR 2
+PASS  bad length -> ERROR 3
+PASS  unknown type ignored
+PASS  ACK wrong CRC -> ERROR 5, clip kept
+PASS  CFG_SET ranges
+PASS  WIFI_SET refused without encryption
+PASS  REPLY states
+PASS  GET + ACK deletes  - clip 6 deleted; pending 35
+PASS  CLIP_STARTED + GET while recording  - clip 43: 4571 bytes streamed while recording, 6286 in all, 2780 ms, voiced 0 ms, CRC ok

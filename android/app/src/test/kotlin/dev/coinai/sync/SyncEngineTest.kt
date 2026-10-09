@@ -57,6 +57,20 @@ class SyncEngineTest {
     }
 
     @Test
+    fun startTimeFromClipEndedWhenTheCoinKnewIt() = runTest {
+        val store = MemoryClips(tmp.root)
+        val coin = FakeCoin(backgroundScope)
+        coin.addClip(3, bytes(1000), durationMs = 4000, startUtcMs = 1_791_000_000_123L)
+        coin.addClip(4, bytes(1000), durationMs = 4000)
+
+        engine(store).runSession(coin)
+
+        assertEquals(1_791_000_000_123L, store.row(3).startedAtMs)
+        // Unknown on the coin: receive time minus duration.
+        assertEquals(store.row(4).receivedAtMs!! - 4000, store.row(4).startedAtMs)
+    }
+
+    @Test
     fun helloListGetAckForEveryClip() = runTest {
         val store = MemoryClips(tmp.root)
         val coin = FakeCoin(backgroundScope)
