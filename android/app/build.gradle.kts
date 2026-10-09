@@ -32,6 +32,10 @@ android {
     testOptions {
         // Robolectric (the Room DAO test) needs merged Android resources and the manifest.
         unitTests.isIncludeAndroidResources = true
+        // Robolectric reaches JDK internals for FileDescriptor (ApplicationSharedMemory on SDK 36).
+        unitTests.all {
+            it.jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED", "--add-exports=java.base/jdk.internal.access=ALL-UNNAMED")
+        }
     }
 
     buildFeatures {
