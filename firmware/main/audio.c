@@ -17,6 +17,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ogg.h"
+#include "power.h"
 
 static const char *TAG = "audio";
 
@@ -32,6 +33,11 @@ static const char *TAG = "audio";
 #define PIN_AMP          GPIO_NUM_46
 #define CAPTURE_STACK    (32 * 1024)  // Opus encoding peaked at ~23.3 KB
 #define PLAYER_STACK     (16 * 1024)
+// Speech detector: a frame is voiced when its RMS is above both an absolute level and the
+// tracked noise floor plus a margin. The floor falls quickly and rises about 0.5 dB/s.
+#define VAD_ABS_DBFS     (-50.0f)
+#define VAD_MARGIN_DB    12.0f
+#define VAD_FLOOR_INIT   (-65.0f)
 
 static esp_codec_dev_handle_t s_mic;
 static esp_codec_dev_handle_t s_spk;
@@ -44,9 +50,16 @@ static TaskHandle_t s_capture_task;
 static volatile bool s_start_req, s_stop_req, s_discard_req;
 static volatile bool s_recording;
 static volatile int s_level;
+static volatile bool s_shutdown_req;
+static SemaphoreHandle_t s_shutdown_done;
+static volatile uint64_t s_first_frame_ticks;
 
 // Owned by the capture task.
 static int16_t s_preroll[PREROLL_FRAMES][FRAME_SAMPLES];
+static bool s_preroll_voiced[PREROLL_FRAMES];
+static float s_floor_db = VAD_FLOOR_INIT;
+static uint32_t s_voiced_frames;
+static uint64_t s_open_ticks;
 static int s_pre_next, s_pre_count;
 static ogg_opus_writer_t s_ogg;
 static FILE *s_file;
@@ -62,6 +75,11 @@ bool audio_is_recording(void)
 int audio_level(void)
 {
     return s_level;
+}
+
+uint64_t audio_first_frame_ticks(void)
+{
+    return s_first_frame_ticks;
 }
 
 void audio_rec_start(void)
@@ -91,7 +109,7 @@ static void high_pass(int16_t *x, int n)
     }
 }
 
-static esp_err_t encode_frame(const int16_t *mono)
+static esp_err_t encode_frame(const int16_t *mono, bool voiced)
 {
     uint8_t pkt[512];
     esp_audio_enc_in_frame_t in = {.buffer = (uint8_t *)mono, .len = FRAME_SAMPLES * sizeof(int16_t)};
@@ -106,6 +124,7 @@ static esp_err_t encode_frame(const int16_t *mono)
     }
     ESP_RETURN_ON_ERROR(ogg_opus_packet(&s_ogg, pkt, out.encoded_bytes, FRAME_GRANULE), TAG, "ogg packet");
     s_frames++;
+    s_voiced_frames += voiced;
     if (s_frames % PAGE_FRAMES == 0) {
         ESP_RETURN_ON_ERROR(ogg_opus_flush(&s_ogg), TAG, "ogg flush");
     }
@@ -128,12 +147,15 @@ static void begin_clip(void)
     }
     esp_opus_enc_reset(s_enc);
     s_frames = 0;
+    s_voiced_frames = 0;
     s_enc_us_total = s_enc_us_max = 0;
+    s_open_ticks = power_rtc_ticks();
     s_recording = true;
     // Oldest pre-roll frame first.
     int first = (s_pre_next - s_pre_count + PREROLL_FRAMES) % PREROLL_FRAMES;
     for (int i = 0; i < s_pre_count; i++) {
-        encode_frame(s_preroll[(first + i) % PREROLL_FRAMES]);
+        int k = (first + i) % PREROLL_FRAMES;
+        encode_frame(s_preroll[k], s_preroll_voiced[k]);
     }
     s_pre_count = 0;
     ESP_LOGI(TAG, "clip %u recording", s_clip_id);
@@ -141,7 +163,7 @@ static void begin_clip(void)
 
 static void finish_clip(bool discard)
 {
-    audio_clip_result_t res = {.id = s_clip_id, .discarded = discard};
+    audio_clip_result_t res = {.id = s_clip_id, .discarded = discard, .open_ticks = s_open_ticks};
     s_recording = false;
     if (!s_file) {
         return;
@@ -149,7 +171,7 @@ static void finish_clip(bool discard)
     if (!discard) {
         static const int16_t silence[FRAME_SAMPLES];
         if (ogg_opus_pending_packets(&s_ogg) == 0) {
-            encode_frame(silence);  // the EOS page must carry a packet
+            encode_frame(silence, false);  // the EOS page must carry a packet
         }
         if (ogg_opus_end(&s_ogg) != ESP_OK) {
             ESP_LOGE(TAG, "clip %u: EOS page failed", s_clip_id);
@@ -163,9 +185,11 @@ static void finish_clip(bool discard)
     } else {
         res.size = s_ogg.bytes;
         res.duration_ms = s_frames * 20;
+        res.voiced_ms = s_voiced_frames * 20;
         res.crc32 = s_ogg.crc32;
-        ESP_LOGI(TAG, "clip %u: %lu bytes, %lu ms, crc %08lx; encode avg %lld us max %lld us; stack free %u",
-                 s_clip_id, (unsigned long)res.size, (unsigned long)res.duration_ms, (unsigned long)res.crc32,
+        ESP_LOGI(TAG, "clip %u: %lu bytes, %lu ms (voiced %lu), crc %08lx; encode avg %lld us max %lld us; stack free %u",
+                 s_clip_id, (unsigned long)res.size, (unsigned long)res.duration_ms, (unsigned long)res.voiced_ms,
+                 (unsigned long)res.crc32,
                  s_frames ? s_enc_us_total / s_frames : 0, s_enc_us_max,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
@@ -184,29 +208,54 @@ static void capture_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
+        if (!s_first_frame_ticks) {
+            s_first_frame_ticks = power_rtc_ticks();
+        }
         int peak = 0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             int v = ((int)stereo[2 * i] + stereo[2 * i + 1]) / 2;
             mono[i] = (int16_t)v;
         }
         high_pass(mono, FRAME_SAMPLES);
+        float energy = 0;
         for (int i = 0; i < FRAME_SAMPLES; i++) {
             int a = abs(mono[i]);
             peak = a > peak ? a : peak;
+            energy += (float)mono[i] * mono[i];
         }
         s_level = peak * 100 / 32768;
+        float db = 10.0f * log10f(energy / FRAME_SAMPLES / (32768.0f * 32768.0f) + 1e-10f);
+        s_floor_db += db < s_floor_db ? (db - s_floor_db) * 0.2f : 0.01f;
+        s_floor_db = s_floor_db < -90.0f ? -90.0f : s_floor_db > -40.0f ? -40.0f : s_floor_db;
+        bool voiced = db > VAD_ABS_DBFS && db > s_floor_db + VAD_MARGIN_DB;
 
+        if (s_shutdown_req) {
+            if (s_recording) {
+                finish_clip(false);
+            }
+            break;
+        }
         if (s_start_req && !s_recording) {
             s_start_req = false;
-            begin_clip();
+            if (s_stop_req) {
+                s_stop_req = false;  // released before capture began: nothing to keep
+                ESP_LOGI(TAG, "recording cancelled before the first frame");
+                if (s_cb) {
+                    audio_clip_result_t none = {.discarded = true};  // id 0: no clip was created
+                    s_cb(&none, s_cb_ctx);
+                }
+            } else {
+                begin_clip();
+            }
         }
         if (s_recording) {
-            if (encode_frame(mono) != ESP_OK) {
+            if (encode_frame(mono, voiced) != ESP_OK) {
                 ESP_LOGE(TAG, "clip %u: write failed, stopping", s_clip_id);
                 s_stop_req = true;
             }
         } else {
             memcpy(s_preroll[s_pre_next], mono, sizeof mono);
+            s_preroll_voiced[s_pre_next] = voiced;
             s_pre_next = (s_pre_next + 1) % PREROLL_FRAMES;
             if (s_pre_count < PREROLL_FRAMES) {
                 s_pre_count++;
@@ -220,6 +269,24 @@ static void capture_task(void *arg)
             }
         }
     }
+    free(stereo);
+    xSemaphoreGive(s_shutdown_done);
+    vTaskDelete(NULL);
+}
+
+void audio_shutdown(void)
+{
+    if (!s_capture_task) {
+        return;
+    }
+    s_shutdown_req = true;
+    xSemaphoreTake(s_shutdown_done, portMAX_DELAY);
+    s_capture_task = NULL;
+    xSemaphoreTake(s_spk_lock, portMAX_DELAY);  // waits out any playback
+    gpio_set_level(PIN_AMP, 0);
+    esp_codec_dev_close(s_mic);
+    esp_codec_dev_close(s_spk);
+    ESP_LOGI(TAG, "audio off");
 }
 
 static void amp(bool on)
@@ -239,7 +306,8 @@ esp_err_t audio_init(audio_clip_cb_t cb, void *ctx)
     s_cb = cb;
     s_cb_ctx = ctx;
     s_spk_lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_spk_lock, ESP_ERR_NO_MEM, TAG, "mutex");
+    s_shutdown_done = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_spk_lock && s_shutdown_done, ESP_ERR_NO_MEM, TAG, "semaphores");
 
     s_spk = bsp_audio_codec_speaker_init();
     s_mic = bsp_audio_codec_microphone_init();

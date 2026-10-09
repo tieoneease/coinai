@@ -78,3 +78,9 @@ esp_err_t imu_read(imu_sample_t *s)
     s->gz = raw[6] / GYRO_LSB_PER_DPS;
     return ESP_OK;
 }
+
+esp_err_t imu_sleep(void)
+{
+    ESP_RETURN_ON_ERROR(write_reg(REG_CTRL7, 0x00), TAG, "ctrl7");  // accel + gyro off
+    return write_reg(REG_CTRL1, 0x41);                              // and the internal 2 MHz oscillator
+}

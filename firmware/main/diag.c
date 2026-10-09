@@ -19,6 +19,7 @@
 #include "imu.h"
 #include "lvgl.h"
 #include "pmic.h"
+#include "power.h"
 
 static const char *TAG = "diag";
 static i2c_master_bus_handle_t s_bus;
@@ -272,6 +273,63 @@ static int cmd_level(int argc, char **argv)
     return 0;
 }
 
+// sleep [s] [rec]: standby; wake on PWR or after s seconds (rec: the timer wake records like a hold).
+static int cmd_sleep(int argc, char **argv)
+{
+    uint32_t s = argc > 1 ? (uint32_t)atoi(argv[1]) : 0;
+    bool rec = argc > 2 && strcmp(argv[2], "rec") == 0;
+    printf("standby%s\n", s ? "" : " until PWR");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    power_enter_standby(s, rec);
+    return 0;
+}
+
+static int cmd_ptttest(int argc, char **argv)
+{
+    int n = argc > 1 ? atoi(argv[1]) : 10;
+    if (n < 1 || n > 16) {
+        printf("usage: ptttest [cycles 1-16]\n");
+        return 1;
+    }
+    printf("%d cycles of standby -> timer wake -> record; results in pttlog\n", n);
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    power_test_series_begin(n);
+    power_enter_standby(1, true);
+    return 0;
+}
+
+static int cmd_pttlog(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "clear") == 0) {
+        power_clear_ptt_log();
+        printf("cleared\n");
+        return 0;
+    }
+    power_print_ptt_log();
+    return 0;
+}
+
+static int cmd_wake(int argc, char **argv)
+{
+    uint64_t first = audio_first_frame_ticks();
+    int64_t ref = power_ref_to_boot_us();
+    printf("wake %s; ref->boot %s%.1f ms; boot->first frame %.1f ms\n", power_wake_name(power_wake_kind()),
+           ref < 0 ? "unknown " : "", ref < 0 ? 0.0 : ref / 1000.0,
+           first ? power_ticks_to_us(power_boot_ticks(), first) / 1000.0 : -1.0);
+    return 0;
+}
+
+static int cmd_poweroff(int argc, char **argv)
+{
+    printf("powering off; PWR turns the board back on\n");
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    power_off();
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     esp_restart();
@@ -302,6 +360,11 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "tone", .help = "Speaker test tone: tone [hz] [ms]", .func = cmd_tone},
         {.command = "level", .help = "Microphone peak level for 2 s", .func = cmd_level},
         {.command = "loopback", .help = "Record while playing a tone: loopback [hz]", .func = cmd_loopback},
+        {.command = "sleep", .help = "Standby: sleep [timer s] [rec]", .func = cmd_sleep},
+        {.command = "ptttest", .help = "Automatic standby->record latency trials: ptttest [n]", .func = cmd_ptttest},
+        {.command = "pttlog", .help = "Wake-to-record latency records: pttlog [clear]", .func = cmd_pttlog},
+        {.command = "wake", .help = "This boot's wake kind and timings", .func = cmd_wake},
+        {.command = "poweroff", .help = "Switch the PMIC off", .func = cmd_poweroff},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
     };
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {

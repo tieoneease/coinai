@@ -15,5 +15,7 @@ typedef enum {
 // held_ms is the press duration for *_UP events and 0 otherwise. Runs on the input task.
 typedef void (*input_cb_t)(input_event_t ev, uint32_t held_ms, void *ctx);
 
-esp_err_t input_init(input_cb_t cb, void *ctx);
+// assume_pwr_pressed: the caller believes PWR is held (a PTT wake). If it was released before the
+// edge interrupt existed, an INPUT_PWR_UP is still delivered.
+esp_err_t input_init(input_cb_t cb, void *ctx, bool assume_pwr_pressed);
 void input_get(bool *pwr_pressed, bool *boot_pressed);

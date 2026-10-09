@@ -32,3 +32,9 @@ esp_err_t pmic_set_charge_current_ma(int ma);
 
 esp_err_t pmic_read_reg(uint8_t reg, uint8_t *val);
 esp_err_t pmic_write_reg(uint8_t reg, uint8_t val);
+// ALDO1 feeds the audio codecs' analog side (A3V3).
+esp_err_t pmic_set_aldo1(bool on);
+// The PMIC's own power-off after holding PWR for the OFF time (factory: enabled, 6 s).
+esp_err_t pmic_set_long_press_off(bool enable);
+// Everything loses power; only PWR (or plugging in USB) turns the board back on.
+esp_err_t pmic_power_off(void);

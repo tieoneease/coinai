@@ -14,6 +14,7 @@ enum {
     REG_STATUS1 = 0x00,
     REG_STATUS2 = 0x01,
     REG_IC_TYPE = 0x03,
+    REG_COMMON_CFG = 0x10,
     REG_PWRON_STATUS = 0x20,
     REG_PWROFF_STATUS = 0x21,
     REG_PWROFF_EN = 0x22,
@@ -171,4 +172,27 @@ esp_err_t pmic_set_charge_current_ma(int ma)
     }
     ESP_LOGI(TAG, "charge current %d mA -> %d mA (reg 0x62: 0x%02x -> 0x%02x)", charge_current_ma(old), ma, old, val);
     return ESP_OK;
+}
+
+esp_err_t pmic_set_aldo1(bool on)
+{
+    uint8_t v;
+    ESP_RETURN_ON_ERROR(pmic_read_reg(REG_LDO_ONOFF0, &v), TAG, "ldo onoff");
+    uint8_t nv = on ? (v | 0x01) : (v & ~0x01);
+    return nv == v ? ESP_OK : pmic_write_reg(REG_LDO_ONOFF0, nv);
+}
+
+esp_err_t pmic_set_long_press_off(bool enable)
+{
+    uint8_t v;
+    ESP_RETURN_ON_ERROR(pmic_read_reg(REG_PWROFF_EN, &v), TAG, "pwroff en");
+    uint8_t nv = enable ? (v | 0x02) : (v & ~0x02);
+    return nv == v ? ESP_OK : pmic_write_reg(REG_PWROFF_EN, nv);
+}
+
+esp_err_t pmic_power_off(void)
+{
+    uint8_t v;
+    ESP_RETURN_ON_ERROR(pmic_read_reg(REG_COMMON_CFG, &v), TAG, "common cfg");
+    return pmic_write_reg(REG_COMMON_CFG, v | 0x01);  // soft power-off: every rail drops
 }

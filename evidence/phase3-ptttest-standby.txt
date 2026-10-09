@@ -1,0 +1,13 @@
+wake        clip  ref->boot  boot->1st frame  boot->file  ref->1st frame  clip ms  voiced ms
+timer-test     5      113.3             94.9        98.1           208.3     1580         60
+timer-test     6      114.2             94.9        98.4           209.1     1580         80
+timer-test     7      113.0             97.7       101.8           210.7     1580         40
+timer-test     8      112.7            114.9       119.4           227.6     1560          0
+timer-test     9      113.8            114.9       119.3           228.7     1560          0
+timer-test    10      114.6            114.1       162.3           228.6     1640         20
+timer-test    11      112.1             97.5       101.0           209.6     1580         40
+timer-test    12      112.8            114.1       117.6           226.8     1560          0
+timer-test    13      114.2            115.0       119.2           229.2     1560          0
+timer-test    14      112.6            114.8       119.3           227.4     1560          0
+
+Source: ptttest 10 on USB power (2026-10-09). ref = timer alarm; first frame = first 20 ms of audio in RAM.

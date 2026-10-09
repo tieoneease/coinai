@@ -17,6 +17,7 @@ static const char *TAG = "input";
 static QueueHandle_t s_queue;
 static input_cb_t s_cb;
 static void *s_ctx;
+static bool s_assume_pwr;
 
 static bool is_pressed(gpio_num_t pin)
 {
@@ -43,9 +44,10 @@ static void IRAM_ATTR edge_isr(void *arg)
 static void input_task(void *arg)
 {
     const gpio_num_t pins[2] = {PIN_PWR, PIN_BOOT};
-    bool state[2] = {is_pressed(PIN_PWR), is_pressed(PIN_BOOT)};
+    bool state[2] = {s_assume_pwr, is_pressed(PIN_BOOT)};
     int64_t since[2] = {esp_timer_get_time(), esp_timer_get_time()};
-    uint32_t pin;
+    uint32_t pin = PIN_PWR;
+    xQueueSend(s_queue, &pin, 0);  // reconcile the assumed state with the pins once at start
     for (;;) {
         if (xQueueReceive(s_queue, &pin, portMAX_DELAY) != pdTRUE) {
             continue;
@@ -70,10 +72,11 @@ static void input_task(void *arg)
     }
 }
 
-esp_err_t input_init(input_cb_t cb, void *ctx)
+esp_err_t input_init(input_cb_t cb, void *ctx, bool assume_pwr_pressed)
 {
     s_cb = cb;
     s_ctx = ctx;
+    s_assume_pwr = assume_pwr_pressed;
     s_queue = xQueueCreate(16, sizeof(uint32_t));
     ESP_RETURN_ON_FALSE(s_queue, ESP_ERR_NO_MEM, TAG, "queue");
 
@@ -86,11 +89,10 @@ esp_err_t input_init(input_cb_t cb, void *ctx)
         .intr_type = GPIO_INTR_ANYEDGE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "gpio config");
-    // The BSP's touch driver normally installs the shared GPIO ISR service already.
-    if (gpio_isr_handler_add(PIN_PWR, edge_isr, (void *)PIN_PWR) == ESP_ERR_INVALID_STATE) {
-        ESP_RETURN_ON_ERROR(gpio_install_isr_service(0), TAG, "isr service");
-        ESP_RETURN_ON_ERROR(gpio_isr_handler_add(PIN_PWR, edge_isr, (void *)PIN_PWR), TAG, "pwr isr");
-    }
+    // input_init() runs before the touch driver, so the shared GPIO ISR service is installed here.
+    esp_err_t err = gpio_install_isr_service(0);
+    ESP_RETURN_ON_FALSE(err == ESP_OK || err == ESP_ERR_INVALID_STATE, err, TAG, "isr service");
+    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(PIN_PWR, edge_isr, (void *)PIN_PWR), TAG, "pwr isr");
     ESP_RETURN_ON_ERROR(gpio_isr_handler_add(PIN_BOOT, edge_isr, (void *)PIN_BOOT), TAG, "boot isr");
 
     bool pwr, boot;
