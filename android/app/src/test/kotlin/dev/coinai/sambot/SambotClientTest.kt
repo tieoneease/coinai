@@ -178,7 +178,7 @@ class SambotClientTest {
             sse.stall()
         }
         val (result, elapsed) = measureTimedValue { client.ask("hi", timeout = 1.seconds) }
-        assertEquals(AskResult("Partial ", steered = true, partial = true), result)
+        assertEquals(AskResult("Partial", steered = true, partial = true), result)
         assertTrue("took $elapsed", elapsed < 4.seconds)
     }
 

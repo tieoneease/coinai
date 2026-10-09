@@ -50,7 +50,7 @@ def encode(name, f):
     elif name == "CLIP_STARTED":
         v = struct.pack("<HBIQ", f["clip"], f["codec"], f["sample_rate"], f["start_utc_ms"])
     elif name == "CLIP_ENDED":
-        v = struct.pack("<HIII", f["clip"], f["size"], f["duration_ms"], f["crc32"])
+        v = struct.pack("<HIIII", f["clip"], f["size"], f["duration_ms"], f["crc32"], f["voiced_ms"])
     elif name == "LIST_RESULT":
         v = bytes([1 if f["more"] else 0]) + b"".join(
             struct.pack("<HIB", e["clip"], e["size"], 1 if e["complete"] else 0) for e in f["entries"])
@@ -80,7 +80,7 @@ CASES = [
     ("device_to_app", "STATUS", {"battery_pct": 87, "charging": 1, "usb_power": 1, "recording": 0, "pending": 2, "fw_version": "0.1.0"}),
     ("device_to_app", "STATUS", {"battery_pct": 255, "charging": 0, "usb_power": 0, "recording": 1, "pending": 0, "fw_version": "0.1.0"}),
     ("device_to_app", "CLIP_STARTED", {"clip": 7, "codec": 1, "sample_rate": 16000, "start_utc_ms": T}),
-    ("device_to_app", "CLIP_ENDED", {"clip": 7, "size": 18234, "duration_ms": 6020, "crc32": 0x1234ABCD}),
+    ("device_to_app", "CLIP_ENDED", {"clip": 7, "size": 18234, "duration_ms": 6020, "crc32": 0x1234ABCD, "voiced_ms": 4180}),
     ("device_to_app", "LIST_RESULT", {"more": False, "entries": [
         {"clip": 6, "size": 9000, "complete": True},
         {"clip": 7, "size": 18234, "complete": True},

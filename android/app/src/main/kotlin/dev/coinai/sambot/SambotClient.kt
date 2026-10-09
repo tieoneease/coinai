@@ -142,7 +142,7 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         when (stage) {
             Stage.AWAITING_LIVE -> throw SambotException("timed out after $timeout waiting for $HOST_STREAM_LIVE; prompt not sent")
             Stage.PROMPTING -> throw PromptOutcomeUnknownException("timed out after $timeout during POST /prompt")
-            Stage.COLLECTING -> AskResult(reply.toString(), steered, partial = !settled)
+            Stage.COLLECTING -> AskResult(reply.toString().trim(), steered, partial = !settled) // trimmed like the reference client
         }
     }
 
