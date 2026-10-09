@@ -207,7 +207,7 @@ storage,  data, littlefs, 0xC30000, 0x13D0000
 
 Each phase ends with evidence on the device or your phone. **You** marks the steps that need you there.
 
-**Status (2026-10-09):**
+**Status (2026-10-10):**
 
 | Phase | State | Still open |
 |---|---|---|
@@ -215,7 +215,8 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
 | 1 | done | **you:** screen, touch and button counters; IMU INT1 pin |
 | 2 | done: clips decode, loopback tone 65 dB above control | **you:** listen to a clip |
 | 3 | standby → first audio frame **208–229 ms** over 10 unattended trials (target 400 ms) | **you:** real PWR presses from Standby and Off; BOOT+PWR power-off; then disable the PMIC long-press (D5) |
-| 4 | firmware GATT server built: advertises (seen by the PC), RAM budget fixed (93 KB internal free), recording unaffected by the radio. Protocol layer passes 11/11 edge-case checks over the USB console link, including resume and GET-while-recording (`evidence/phase4-selftest-serial.txt`). App slice 2 merged (77 unit tests). **No over-the-air exchange yet:** the PC's adapter is too deaf to hold a connection | **you:** USB debugging on the phone (installs the app and runs the link tests), or attach the PC's Wi-Fi/BT antenna; pairing passkey entry on the phone |
+| 4 | firmware GATT server built: advertises (seen by the PC), RAM budget fixed (93 KB internal free), recording unaffected by the radio. Protocol layer passes 11/11 edge-case checks over the USB console link, including resume and GET-while-recording (`evidence/phase4-selftest-serial.txt`). App slice 2 merged (77 unit tests). **No over-the-air exchange with the device yet:** the PC's adapter is too deaf to hold a connection | **you:** USB debugging on the phone (installs the app and runs the link tests), or attach the PC's Wi-Fi/BT antenna; pairing passkey entry on the phone |
+| sim | desktop simulator ([sim/README.md](sim/README.md)): the firmware runs as `coinsim.exe` with a browser UI. Over virtual BLE (Bumble, and netsim as the emulator uses) the full PROTOCOL.md exchange works with pairing and bonds, and a recorded sentence reaches SamBot exactly. It also exercised paths not yet tried on the device: cut-off clip recovery, low-battery off, idle Standby | **you:** enable Windows Hypervisor Platform and reboot, so the Android emulator can run the app against it |
 
 0. **Safety net and toolchains.**
    - ESP-IDF v5.5.5 via Espressif's EIM.
