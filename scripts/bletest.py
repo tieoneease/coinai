@@ -166,7 +166,13 @@ class SerialCoin(Coin):
                 m = self.LINE.search(raw.decode(errors="replace"))
                 if not m:
                     continue
-                data = bytes.fromhex(m.group(2))
+                try:
+                    data = bytes.fromhex(m.group(2))
+                except ValueError:
+                    # A line split by other console output. A lost data packet is repaired by a
+                    # resume GET, as over the radio.
+                    print(f"skipped a damaged console line ({len(raw)} bytes)")
+                    continue
                 handler = self._on_ctrl if m.group(1) == "CTRL" else self._on_data
                 self.loop.call_soon_threadsafe(handler, None, data)
 

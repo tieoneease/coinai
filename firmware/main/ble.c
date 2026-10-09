@@ -2,12 +2,13 @@
 
 #include <string.h>
 #include <sys/time.h>
+#include <unistd.h>
+#include "ble_link.h"
 #include "clipstore.h"
 #include "diag.h"
 #include "display.h"
 #include "esp_app_desc.h"
 #include "esp_attr.h"
-#include "esp_bt.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -16,24 +17,10 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "host/ble_hs.h"
-#include "host/util/util.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "nvs.h"
 #include "settings.h"
-#include "services/bas/ble_svc_bas.h"
-#include "services/dis/ble_svc_dis.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
 
 static const char *TAG = "ble";
-
-void ble_store_config_init(void);
-
-// c0a1XXXX-f569-41ae-8676-7f5a60d835fc, in NimBLE's little-endian byte order.
-#define COINAI_UUID(n) \
-    BLE_UUID128_INIT(0xfc, 0x35, 0xd8, 0x60, 0x5a, 0x7f, 0x76, 0x86, 0xae, 0x41, 0x69, 0xf5, (n), 0x00, 0xa1, 0xc0)
 
 enum {
     MSG_HELLO = 0x01, MSG_LIST = 0x02, MSG_GET = 0x03, MSG_ACK = 0x04, MSG_WIFI_SET = 0x05, MSG_CFG_SET = 0x06,
@@ -42,7 +29,7 @@ enum {
 };
 enum { ERR_UNKNOWN_CLIP = 1, ERR_BAD_OFFSET = 2, ERR_BAD_LENGTH = 3, ERR_BUSY = 4, ERR_INVALID = 5 };
 
-#define TLV_MAX        244  // one ATT operation at MTU 247 (PROTOCOL.md rule 6)
+#define TLV_MAX        LINK_VALUE_MAX
 #define DATA_HDR       6
 #define LIST_PER_MSG   34
 #define MAX_LIST       256
@@ -55,19 +42,13 @@ typedef struct {
     uint8_t buf[TLV_MAX];
 } ev_t;
 
-static const ble_uuid128_t s_svc_uuid = COINAI_UUID(0x00);
-static const ble_uuid128_t s_ctrl_uuid = COINAI_UUID(0x01);
-static const ble_uuid128_t s_data_uuid = COINAI_UUID(0x02);
-static uint16_t s_ctrl_handle, s_data_handle;
-
 static QueueHandle_t s_ev;
 static TaskHandle_t s_worker;
 static SemaphoreHandle_t s_ind_done;
 static SemaphoreHandle_t s_lock;  // guards s_st and the device-status snapshot
-static volatile int s_ind_status;
-static uint8_t s_own_addr_type;
-static volatile bool s_synced;
-static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile bool s_ind_ok;
+static volatile bool s_radio_up;
+static volatile uint16_t s_conn = LINK_CONN_NONE;
 static volatile bool s_ctrl_sub, s_data_sub;
 static volatile bool s_bench;
 static volatile bool s_console;  // ble_inject(): answers go to the USB console while no phone is connected
@@ -91,8 +72,6 @@ static struct {
     FILE *f;
 } s_tx;
 
-static int gap_event(struct ble_gap_event *event, void *arg);
-
 // ---------- helpers ----------
 
 static void put16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
@@ -107,12 +86,6 @@ static uint64_t utc_now_ms(void)
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return tv.tv_sec > 1700000000 ? (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
-}
-
-static bool link_authenticated(uint16_t conn)
-{
-    struct ble_gap_conn_desc d;
-    return ble_gap_conn_find(conn, &d) == 0 && d.sec_state.encrypted && d.sec_state.authenticated;
 }
 
 static void post(ev_type_t type, const void *buf, size_t len)
@@ -138,18 +111,23 @@ static void refresh_pending(void)
 
 static bool console_link(void)
 {
-    return s_console && s_conn == BLE_HS_CONN_HANDLE_NONE;
+    return s_console && s_conn == LINK_CONN_NONE;
 }
 
-// One "BLE-<kind> <hex>" line in a single printf, so other output cannot split it.
+// One "BLE-<kind> <hex>" line in a single write(). Each task has its own stdout stream, flushed in
+// 128-byte pieces, so a printf of this line could be split by another task's log line.
 static void console_print(const char *kind, const uint8_t *b, size_t len)
 {
     static char line[16 + 2 * (DATA_HDR + 238) + 2];  // worker task only
+    static const char hex[] = "0123456789abcdef";
     int n = snprintf(line, sizeof line, "BLE-%s ", kind);
     for (size_t i = 0; i < len && n + 3 < (int)sizeof line; i++) {
-        n += snprintf(line + n, sizeof line - n, "%02x", b[i]);
+        line[n++] = hex[b[i] >> 4];
+        line[n++] = hex[b[i] & 15];
     }
-    printf("%s\n", line);
+    line[n++] = '\n';
+    fflush(stdout);
+    write(STDOUT_FILENO, line, n);
 }
 
 static esp_err_t send_ctrl(uint8_t type, const uint8_t *value, uint16_t len)
@@ -168,21 +146,18 @@ static esp_err_t send_ctrl(uint8_t type, const uint8_t *value, uint16_t len)
         return ESP_OK;
     }
     uint16_t conn = s_conn;
-    if (conn == BLE_HS_CONN_HANDLE_NONE || !s_ctrl_sub || !(s_bench || link_authenticated(conn))) {
+    if (conn == LINK_CONN_NONE || !s_ctrl_sub || !(s_bench || link_authenticated(conn))) {
         return ESP_ERR_INVALID_STATE;
     }
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(tlv, len + 3);
-    if (!om) {
-        return ESP_ERR_NO_MEM;
-    }
     xSemaphoreTake(s_ind_done, 0);
-    int rc = ble_gatts_indicate_custom(conn, s_ctrl_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "indicate 0x%02x: rc %d", type, rc);
-        return ESP_FAIL;
+    s_ind_ok = false;
+    link_rc_t rc = link_indicate(conn, tlv, len + 3);
+    if (rc != LINK_OK) {
+        ESP_LOGW(TAG, "indicate 0x%02x failed (%d)", type, rc);
+        return rc == LINK_NO_MEM ? ESP_ERR_NO_MEM : ESP_FAIL;
     }
-    if (xSemaphoreTake(s_ind_done, pdMS_TO_TICKS(3000)) != pdTRUE || s_ind_status != BLE_HS_EDONE) {
-        ESP_LOGW(TAG, "indication 0x%02x not confirmed (%d)", type, s_ind_status);
+    if (xSemaphoreTake(s_ind_done, pdMS_TO_TICKS(3000)) != pdTRUE || !s_ind_ok) {
+        ESP_LOGW(TAG, "indication 0x%02x not confirmed", type);
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -271,12 +246,9 @@ static void handle_get(uint16_t clip, uint32_t offset)
     s_st.tx_offset = offset;
     s_st.tx_size = complete ? meta.size : 0;
     xSemaphoreGive(s_lock);
-    // PROTOCOL.md "Link": 15 ms interval, latency 0, 6 s supervision timeout while transferring.
-    struct ble_gap_upd_params p = {
-        .itvl_min = 12, .itvl_max = 12, .latency = 0, .supervision_timeout = 600,
-        .min_ce_len = 0, .max_ce_len = 0,
-    };
-    ble_gap_update_params(s_conn, &p);
+    if (s_conn != LINK_CONN_NONE) {
+        link_transfer_params(s_conn);
+    }
     ESP_LOGI(TAG, "GET clip %u from %lu (%s, %lu bytes)", clip, (unsigned long)offset,
              complete ? "complete" : "recording", (unsigned long)meta.size);
 }
@@ -302,7 +274,7 @@ static bool tx_step(void)
 {
     uint16_t conn = s_conn;
     bool console = console_link();
-    if (!s_tx.active || (!console && (conn == BLE_HS_CONN_HANDLE_NONE || !s_data_sub))) {
+    if (!s_tx.active || (!console && (conn == LINK_CONN_NONE || !s_data_sub))) {
         return false;
     }
     if (!s_tx.complete && audio_recording_clip() != s_tx.clip) {
@@ -322,7 +294,7 @@ static bool tx_step(void)
             return false;
         }
     }
-    int payload_max = console ? 238 : ble_att_mtu(conn) - 3 - DATA_HDR;
+    int payload_max = console ? 238 : link_mtu(conn) - 3 - DATA_HDR;
     if (payload_max > 238) {
         payload_max = 238;
     }
@@ -347,21 +319,20 @@ static bool tx_step(void)
         }
         put16(pkt, s_tx.clip);
         put32(pkt + 2, s_tx.offset);
-        int rc = 0;
+        link_rc_t rc = LINK_OK;
         if (console) {
             console_print("DATA", pkt, DATA_HDR + n);
         } else {
-            struct os_mbuf *om = ble_hs_mbuf_from_flat(pkt, DATA_HDR + n);
-            rc = om ? ble_gatts_notify_custom(conn, s_data_handle, om) : BLE_HS_ENOMEM;
+            rc = link_notify(conn, pkt, DATA_HDR + n);
         }
-        if (rc == BLE_HS_ENOMEM) {
+        if (rc == LINK_NO_MEM) {
             // Host buffers full: the controller drains them at the link's pace.
             fseek(s_tx.f, s_tx.offset, SEEK_SET);
             vTaskDelay(pdMS_TO_TICKS(5));
             return true;
         }
-        if (rc != 0) {
-            ESP_LOGW(TAG, "notify rc %d; transfer stopped", rc);
+        if (rc != LINK_OK) {
+            ESP_LOGW(TAG, "notify failed; transfer stopped");
             tx_stop();
             return false;
         }
@@ -562,13 +533,9 @@ static void worker_task(void *arg)
                 break;
             case EV_CONNECTED: {
                 tx_stop();  // nothing from an earlier link carries over
-                // PROTOCOL.md "Link". The phone, as GATT client, asks for the 247-byte MTU.
                 uint16_t conn = s_conn;
-                int rc1 = ble_gap_set_data_len(conn, 251, 2120);
-                int rc2 = ble_gap_set_prefered_le_phy(conn, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK,
-                                                      BLE_GAP_LE_PHY_CODED_ANY);
-                if (rc1 || rc2) {
-                    ESP_LOGW(TAG, "link setup: data length rc %d, 2M PHY rc %d", rc1, rc2);
+                if (conn != LINK_CONN_NONE) {
+                    link_setup(conn);
                 }
                 break;
             }
@@ -584,201 +551,109 @@ static void worker_task(void *arg)
     }
 }
 
-// ---------- GATT ----------
+// ---------- advertising ----------
 
-static int ctrl_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
+static void adv_apply(void)
 {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    // Checked here rather than with GATT flags so bench mode can skip it at run time. Android
-    // answers this error by pairing (PROTOCOL.md "Security").
-    if (!s_bench && !link_authenticated(conn)) {
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
-    }
-    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
-    if (len > TLV_MAX) {
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    ev_t ev = {.type = EV_RX, .len = len};
-    if (ble_hs_mbuf_to_flat(ctxt->om, ev.buf, sizeof ev.buf, NULL) != 0) {
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    if (xQueueSend(s_ev, &ev, 0) != pdTRUE) {
-        return BLE_ATT_ERR_PREPARE_QUEUE_FULL;
-    }
-    return 0;
-}
-
-static int data_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    return BLE_ATT_ERR_UNLIKELY;  // notify only
-}
-
-static const struct ble_gatt_svc_def s_svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &s_svc_uuid.u,
-        .characteristics = (struct ble_gatt_chr_def[]){
-            {.uuid = &s_ctrl_uuid.u, .access_cb = ctrl_access, .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
-             .val_handle = &s_ctrl_handle},
-            {.uuid = &s_data_uuid.u, .access_cb = data_access, .flags = BLE_GATT_CHR_F_NOTIFY,
-             .val_handle = &s_data_handle},
-            {0},
-        },
-    },
-    {0},
-};
-
-// ---------- GAP ----------
-
-static void adv_start(void)
-{
-    if (!s_synced || s_conn != BLE_HS_CONN_HANDLE_NONE || s_adv_mode == BLE_ADV_OFF) {
-        return;
-    }
-    ble_gap_adv_stop();
-    struct ble_hs_adv_fields f = {0};
-    f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    f.uuids128 = (ble_uuid128_t *)&s_svc_uuid;
-    f.num_uuids128 = 1;
-    f.uuids128_is_complete = 1;
-    f.name = (uint8_t *)"coinai";
-    f.name_len = 6;
-    f.name_is_complete = 1;
-    int rc = ble_gap_adv_set_fields(&f);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "adv fields rc %d", rc);
+    if (!s_radio_up || s_conn != LINK_CONN_NONE || s_adv_mode == BLE_ADV_OFF) {
         return;
     }
     int64_t now = esp_timer_get_time();
     bool fast = s_adv_mode == BLE_ADV_DELIVER && now < s_fast_adv_until_us;
     uint16_t itvl = s_adv_mode == BLE_ADV_IDLE ? 1636 : fast ? 32 : 244;  // 0.625 ms units
-    struct ble_gap_adv_params p = {
-        .conn_mode = BLE_GAP_CONN_MODE_UND,
-        .disc_mode = BLE_GAP_DISC_MODE_GEN,
-        .itvl_min = itvl,
-        .itvl_max = itvl,
-    };
-    int32_t duration = fast ? (int32_t)((s_fast_adv_until_us - now) / 1000) : BLE_HS_FOREVER;
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, duration, &p, gap_event, NULL);
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGE(TAG, "adv start rc %d", rc);
+    link_adv_start(itvl, fast ? (int32_t)((s_fast_adv_until_us - now) / 1000) : -1);
+}
+
+// ---------- radio events (ble_link.h; the radio's task) ----------
+
+void proto_ready(bool up)
+{
+    s_radio_up = up;
+    if (up) {
+        adv_apply();
     }
 }
 
-static int gap_event(struct ble_gap_event *event, void *arg)
+void proto_connected(uint16_t conn)
 {
-    struct ble_gap_conn_desc desc;
-    switch (event->type) {
-    case BLE_GAP_EVENT_CONNECT:
-        if (event->connect.status != 0) {
-            adv_start();
-            return 0;
-        }
-        s_conn = event->connect.conn_handle;
-        s_ctrl_sub = s_data_sub = false;
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_st.connected = true;
-        s_st.authenticated = false;
-        xSemaphoreGive(s_lock);
-        ESP_LOGI(TAG, "connected");
-        // HCI commands issued from inside this callback time out (seen on IDF 5.5.5: LE Set Data
-        // Length never acked, host reset). The worker sets up the link instead.
-        post(EV_CONNECTED, NULL, 0);
-        return 0;
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "disconnected, reason 0x%x", event->disconnect.reason);
-        s_conn = BLE_HS_CONN_HANDLE_NONE;
-        s_ctrl_sub = s_data_sub = false;
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_st.connected = s_st.authenticated = false;
-        s_st.passkey = 0;
-        xSemaphoreGive(s_lock);
-        xSemaphoreGive(s_ind_done);  // release a worker waiting on a confirmation
-        post(EV_DISCONNECTED, NULL, 0);
-        adv_start();
-        return 0;
-    case BLE_GAP_EVENT_ADV_COMPLETE:
-        adv_start();  // end of the fast phase: continue at the slower interval
-        return 0;
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_ctrl_handle) {
-            s_ctrl_sub = event->subscribe.cur_indicate;
-        } else if (event->subscribe.attr_handle == s_data_handle) {
-            s_data_sub = event->subscribe.cur_notify;
-        }
-        return 0;
-    case BLE_GAP_EVENT_NOTIFY_TX:
-        // Status 0 = indication sent; BLE_HS_EDONE = confirmed; anything else ends it too.
-        if (event->notify_tx.indication && event->notify_tx.status != 0) {
-            s_ind_status = event->notify_tx.status;
-            xSemaphoreGive(s_ind_done);
-        }
-        return 0;
-    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
-        ESP_LOGI(TAG, "PHY tx %d rx %d (status %d)", event->phy_updated.tx_phy, event->phy_updated.rx_phy,
-                 event->phy_updated.status);
-        return 0;
-    case BLE_GAP_EVENT_CONN_UPDATE:
-        if (ble_gap_conn_find(event->conn_update.conn_handle, &desc) == 0) {
-            ESP_LOGI(TAG, "connection interval %.2f ms, latency %d, timeout %d ms", desc.conn_itvl * 1.25,
-                     desc.conn_latency, desc.supervision_timeout * 10);
-        }
-        return 0;
-    case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "MTU %u", event->mtu.value);
-        return 0;
-    case BLE_GAP_EVENT_PASSKEY_ACTION:
-        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            struct ble_sm_io io = {.action = BLE_SM_IOACT_DISP, .passkey = esp_random() % 1000000};
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            s_st.passkey = io.passkey ? io.passkey : 1;
-            xSemaphoreGive(s_lock);
-            ESP_LOGI(TAG, "pairing: passkey shown on screen");
-            ble_sm_inject_io(event->passkey.conn_handle, &io);
-        }
-        return 0;
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            s_st.authenticated = desc.sec_state.encrypted && desc.sec_state.authenticated;
-            s_st.passkey = 0;
-            xSemaphoreGive(s_lock);
-            ESP_LOGI(TAG, "encryption %s (status %d, authenticated %d, bonded %d)",
-                     desc.sec_state.encrypted ? "on" : "off", event->enc_change.status, desc.sec_state.authenticated,
-                     desc.sec_state.bonded);
-        }
-        return 0;
-    case BLE_GAP_EVENT_REPEAT_PAIRING:
-        // The phone lost its bond: forget ours and pair again.
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
-        }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-    default:
-        return 0;
+    s_conn = conn;
+    s_ctrl_sub = s_data_sub = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.connected = true;
+    s_st.authenticated = false;
+    xSemaphoreGive(s_lock);
+    // HCI commands issued from inside NimBLE's GAP callback time out (seen on IDF 5.5.5: LE Set Data
+    // Length never acked, host reset). The worker sets up the link instead.
+    post(EV_CONNECTED, NULL, 0);
+}
+
+void proto_disconnected(int reason)
+{
+    s_conn = LINK_CONN_NONE;
+    s_ctrl_sub = s_data_sub = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.connected = s_st.authenticated = false;
+    s_st.passkey = 0;
+    xSemaphoreGive(s_lock);
+    s_ind_ok = false;
+    xSemaphoreGive(s_ind_done);  // release a worker waiting on a confirmation
+    post(EV_DISCONNECTED, NULL, 0);
+    adv_apply();
+}
+
+void proto_subscribed(bool ctrl, bool on)
+{
+    if (ctrl) {
+        s_ctrl_sub = on;
+    } else {
+        s_data_sub = on;
     }
 }
 
-static void on_sync(void)
+proto_write_t proto_ctrl_write(uint16_t conn, const uint8_t *value, uint16_t len)
 {
-    ble_hs_util_ensure_addr(0);
-    ble_hs_id_infer_auto(0, &s_own_addr_type);
-    s_synced = true;
-    adv_start();
+    // Checked here rather than with GATT permissions so bench mode can skip it at run time. Android
+    // answers this error by pairing (PROTOCOL.md "Security").
+    if (!s_bench && !link_authenticated(conn)) {
+        return PROTO_WRITE_AUTHEN;
+    }
+    if (len > TLV_MAX) {
+        return PROTO_WRITE_LEN;
+    }
+    ev_t ev = {.type = EV_RX, .len = len};
+    memcpy(ev.buf, value, len);
+    return xQueueSend(s_ev, &ev, 0) == pdTRUE ? PROTO_WRITE_OK : PROTO_WRITE_QUEUE_FULL;
 }
 
-static void on_reset(int reason)
+void proto_indicate_done(bool confirmed)
 {
-    s_synced = false;
-    ESP_LOGW(TAG, "host reset, reason %d", reason);
+    s_ind_ok = confirmed;
+    xSemaphoreGive(s_ind_done);
 }
 
-static void host_task(void *arg)
+void proto_adv_done(void)
 {
-    nimble_port_run();
-    nimble_port_freertos_deinit();
+    adv_apply();
+}
+
+uint32_t proto_passkey(void)
+{
+    uint32_t p;
+    do {
+        p = esp_random() % 1000000;
+    } while (p == 0);  // 0 means "no passkey" in ble_status_t
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.passkey = p;
+    xSemaphoreGive(s_lock);
+    return p;
+}
+
+void proto_security(bool authenticated)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.authenticated = authenticated;
+    s_st.passkey = 0;
+    xSemaphoreGive(s_lock);
 }
 
 // ---------- public ----------
@@ -792,34 +667,10 @@ esp_err_t ble_init(void)
 
     s_dev.pending = (uint16_t)clipstore_count();
 
-    ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble init");
-    diag_mem_mark("nimble_port");
-    ble_hs_cfg.sync_cb = on_sync;
-    ble_hs_cfg.reset_cb = on_reset;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
-    ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_mitm = 1;
-    ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-    ble_svc_bas_init();
-    ble_svc_dis_init();
-    ble_svc_dis_manufacturer_name_set("coinai");
-    ble_svc_dis_model_number_set("ESP32-S3-Touch-AMOLED-1.75C");
-    ble_svc_dis_firmware_revision_set(esp_app_get_description()->version);
-    ESP_RETURN_ON_FALSE(ble_gatts_count_cfg(s_svcs) == 0 && ble_gatts_add_svcs(s_svcs) == 0, ESP_FAIL, TAG,
-                        "gatt services");
-    ble_svc_gap_device_name_set("coinai");
-    ble_store_config_init();
-
     ESP_RETURN_ON_FALSE(xTaskCreatePinnedToCoreWithCaps(worker_task, "ble_proto", 6144, NULL, 8, &s_worker, 0,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "worker");
-    nimble_port_freertos_init(host_task);
+    ESP_RETURN_ON_ERROR(link_init(), TAG, "radio");
     ESP_LOGI(TAG, "BLE up: %u clips pending", s_dev.pending);
     return ESP_OK;
 }
@@ -834,9 +685,9 @@ void ble_set_adv_mode(ble_adv_mode_t mode)
         s_fast_adv_until_us = esp_timer_get_time() + FAST_ADV_MS * 1000LL;
     }
     if (mode == BLE_ADV_OFF) {
-        ble_gap_adv_stop();
+        link_adv_stop();
     } else {
-        adv_start();
+        adv_apply();
     }
 }
 
@@ -856,7 +707,7 @@ void ble_get_status(ble_status_t *out)
 
 bool ble_busy(void)
 {
-    if (!s_lock || s_conn == BLE_HS_CONN_HANDLE_NONE) {
+    if (!s_lock || s_conn == LINK_CONN_NONE) {
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -880,9 +731,9 @@ void ble_note_device_status(int battery_pct, bool charging, bool usb_power, bool
     xSemaphoreGive(s_lock);
     if (changed) {
         if (battery_pct >= 0) {
-            ble_svc_bas_battery_level_set((uint8_t)battery_pct);
+            link_set_battery((uint8_t)battery_pct);
         }
-        if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        if (s_conn != LINK_CONN_NONE) {
             post(EV_STATUS, NULL, 0);
         }
     }
@@ -931,28 +782,17 @@ void ble_set_bench(bool on)
 
 esp_err_t ble_set_tx_power(int dbm)
 {
-    int level = dbm >= 20 ? ESP_PWR_LVL_P20 : dbm <= -24 ? ESP_PWR_LVL_N24 : (dbm + 24) / 3;
-    esp_err_t err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, level);
-    if (err == ESP_OK) {
-        err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, level);
-    }
-    if (err == ESP_OK && s_conn != BLE_HS_CONN_HANDLE_NONE) {
-        err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, level);
-    }
-    ESP_LOGI(TAG, "TX power level %d (%d dBm requested): %s", level, dbm, esp_err_to_name(err));
-    return err;
+    return link_set_tx_power(s_conn, dbm);
 }
 
 int ble_conn_rssi(void)
 {
-    int8_t rssi = 0;
-    uint16_t conn = s_conn;
-    return conn != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_rssi(conn, &rssi) == 0 ? rssi : 0;
+    return link_rssi(s_conn);
 }
 
 esp_err_t ble_forget_bonds(void)
 {
-    return ble_store_clear() == 0 ? ESP_OK : ESP_FAIL;
+    return link_forget_bonds();
 }
 
 void ble_shutdown(void)
@@ -961,11 +801,11 @@ void ble_shutdown(void)
         return;
     }
     s_adv_mode = BLE_ADV_OFF;
-    ble_gap_adv_stop();
+    link_adv_stop();
     uint16_t conn = s_conn;
-    if (conn != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
-        for (int i = 0; i < 50 && s_conn != BLE_HS_CONN_HANDLE_NONE; i++) {
+    if (conn != LINK_CONN_NONE) {
+        link_disconnect(conn);
+        for (int i = 0; i < 50 && s_conn != LINK_CONN_NONE; i++) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
