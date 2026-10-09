@@ -40,6 +40,11 @@ void ble_note_device_status(int battery_pct, bool charging, bool usb_power, bool
 void ble_clip_event(const audio_clip_result_t *clip, bool started);
 // Bench mode: protocol messages accepted without pairing, until the next reboot. USB console only.
 void ble_set_bench(bool on);
+// USB console test link (`ble inject <hex>`): feeds one ctrl TLV to the protocol worker as if the
+// phone had written it. While no phone is connected, the answers and data packets are printed as
+// "BLE-CTRL <hex>" and "BLE-DATA <hex>" lines instead of being sent over the air.
+void ble_inject(const uint8_t *tlv, size_t len);
+void ble_console_link(bool on);
 esp_err_t ble_forget_bonds(void);
 // Radio TX power for advertising and the connection, -24..+20 dBm (default +9).
 esp_err_t ble_set_tx_power(int dbm);

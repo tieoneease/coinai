@@ -70,6 +70,7 @@ static volatile bool s_synced;
 static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_ctrl_sub, s_data_sub;
 static volatile bool s_bench;
+static volatile bool s_console;  // ble_inject(): answers go to the USB console while no phone is connected
 static ble_adv_mode_t s_adv_mode = BLE_ADV_OFF;
 static int64_t s_fast_adv_until_us;
 static ble_status_t s_st = {.reply_state = -1};
@@ -135,12 +136,24 @@ static void refresh_pending(void)
 
 // ---------- outgoing ctrl messages (worker task only) ----------
 
+static bool console_link(void)
+{
+    return s_console && s_conn == BLE_HS_CONN_HANDLE_NONE;
+}
+
+// One "BLE-<kind> <hex>" line in a single printf, so other output cannot split it.
+static void console_print(const char *kind, const uint8_t *b, size_t len)
+{
+    static char line[16 + 2 * (DATA_HDR + 238) + 2];  // worker task only
+    int n = snprintf(line, sizeof line, "BLE-%s ", kind);
+    for (size_t i = 0; i < len && n + 3 < (int)sizeof line; i++) {
+        n += snprintf(line + n, sizeof line - n, "%02x", b[i]);
+    }
+    printf("%s\n", line);
+}
+
 static esp_err_t send_ctrl(uint8_t type, const uint8_t *value, uint16_t len)
 {
-    uint16_t conn = s_conn;
-    if (conn == BLE_HS_CONN_HANDLE_NONE || !s_ctrl_sub || !(s_bench || link_authenticated(conn))) {
-        return ESP_ERR_INVALID_STATE;
-    }
     uint8_t tlv[TLV_MAX];
     if (len + 3 > TLV_MAX) {
         return ESP_ERR_INVALID_SIZE;
@@ -149,6 +162,14 @@ static esp_err_t send_ctrl(uint8_t type, const uint8_t *value, uint16_t len)
     put16(tlv + 1, len);
     if (len) {
         memcpy(tlv + 3, value, len);
+    }
+    if (console_link()) {
+        console_print("CTRL", tlv, len + 3);
+        return ESP_OK;
+    }
+    uint16_t conn = s_conn;
+    if (conn == BLE_HS_CONN_HANDLE_NONE || !s_ctrl_sub || !(s_bench || link_authenticated(conn))) {
+        return ESP_ERR_INVALID_STATE;
     }
     struct os_mbuf *om = ble_hs_mbuf_from_flat(tlv, len + 3);
     if (!om) {
@@ -280,7 +301,8 @@ static void send_clip_ended(void)
 static bool tx_step(void)
 {
     uint16_t conn = s_conn;
-    if (!s_tx.active || conn == BLE_HS_CONN_HANDLE_NONE || !s_data_sub) {
+    bool console = console_link();
+    if (!s_tx.active || (!console && (conn == BLE_HS_CONN_HANDLE_NONE || !s_data_sub))) {
         return false;
     }
     if (!s_tx.complete && audio_recording_clip() != s_tx.clip) {
@@ -300,7 +322,7 @@ static bool tx_step(void)
             return false;
         }
     }
-    int payload_max = ble_att_mtu(conn) - 3 - DATA_HDR;
+    int payload_max = console ? 238 : ble_att_mtu(conn) - 3 - DATA_HDR;
     if (payload_max > 238) {
         payload_max = 238;
     }
@@ -325,8 +347,13 @@ static bool tx_step(void)
         }
         put16(pkt, s_tx.clip);
         put32(pkt + 2, s_tx.offset);
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(pkt, DATA_HDR + n);
-        int rc = om ? ble_gatts_notify_custom(conn, s_data_handle, om) : BLE_HS_ENOMEM;
+        int rc = 0;
+        if (console) {
+            console_print("DATA", pkt, DATA_HDR + n);
+        } else {
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(pkt, DATA_HDR + n);
+            rc = om ? ble_gatts_notify_custom(conn, s_data_handle, om) : BLE_HS_ENOMEM;
+        }
         if (rc == BLE_HS_ENOMEM) {
             // Host buffers full: the controller drains them at the link's pace.
             fseek(s_tx.f, s_tx.offset, SEEK_SET);
@@ -511,6 +538,7 @@ static void worker_task(void *arg)
                 break;
             case EV_CLIP_STARTED: {
                 refresh_pending();
+                s_dev.recording = true;  // the status task notices only up to 200 ms later
                 uint8_t v[15];
                 memcpy(v, ev.buf, 2);
                 v[2] = 1;  // Ogg Opus
@@ -522,12 +550,14 @@ static void worker_task(void *arg)
             }
             case EV_CLIP_FINISHED:
                 refresh_pending();
+                s_dev.recording = false;
                 send_status();
                 break;
             case EV_STATUS:
                 send_status();
                 break;
             case EV_CONNECTED: {
+                tx_stop();  // nothing from an earlier link carries over
                 // PROTOCOL.md "Link". The phone, as GATT client, asks for the 247-byte MTU.
                 uint16_t conn = s_conn;
                 int rc1 = ble_gap_set_data_len(conn, 251, 2120);
@@ -863,6 +893,23 @@ void ble_clip_event(const audio_clip_result_t *clip, bool started)
     uint8_t id[2];
     put16(id, clip->id);
     post(started ? EV_CLIP_STARTED : EV_CLIP_FINISHED, id, 2);
+}
+
+void ble_inject(const uint8_t *tlv, size_t len)
+{
+    if (!s_ev || len > TLV_MAX) {
+        return;
+    }
+    s_console = true;
+    post(EV_RX, tlv, len);
+}
+
+void ble_console_link(bool on)
+{
+    s_console = on;
+    if (!on && s_ev) {
+        post(EV_DISCONNECTED, NULL, 0);  // ends a transfer the console link started
+    }
 }
 
 void ble_set_bench(bool on)

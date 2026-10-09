@@ -233,6 +233,14 @@ static int cmd_fbdump(int argc, char **argv)
 
 static int cmd_rec(int argc, char **argv)
 {
+    if (argc == 2 && (strcmp(argv[1], "start") == 0 || strcmp(argv[1], "stop") == 0)) {
+        if (argv[1][2] == 'a') {
+            audio_rec_start();  // returns at once; `rec stop` ends it
+        } else {
+            audio_rec_stop(false);
+        }
+        return 0;
+    }
     int seconds = argc > 1 ? atoi(argv[1]) : 3;
     if (seconds < 1 || seconds > 600) {
         printf("usage: rec <seconds 1-600>\n");
@@ -438,6 +446,24 @@ static int cmd_ble(int argc, char **argv)
         printf("bonds %s\n", err == ESP_OK ? "deleted" : esp_err_to_name(err));
         return err == ESP_OK ? 0 : 1;
     }
+    if (argc >= 3 && strcmp(argv[1], "inject") == 0) {
+        if (strcmp(argv[2], "off") == 0) {
+            ble_console_link(false);
+            return 0;
+        }
+        static uint8_t tlv[256];
+        size_t hex = strlen(argv[2]);
+        if (hex % 2 || hex / 2 > sizeof tlv) {
+            printf("inject: even number of hex digits, at most %u bytes\n", (unsigned)sizeof tlv);
+            return 1;
+        }
+        for (size_t i = 0; i < hex / 2; i++) {
+            char byte[3] = {argv[2][2 * i], argv[2][2 * i + 1], 0};
+            tlv[i] = (uint8_t)strtoul(byte, NULL, 16);
+        }
+        ble_inject(tlv, hex / 2);
+        return 0;
+    }
     if (argc >= 3 && strcmp(argv[1], "txpower") == 0) {
         return ble_set_tx_power(atoi(argv[2])) == ESP_OK ? 0 : 1;
     }
@@ -475,7 +501,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_cfg.prompt = "coin> ";
-    repl_cfg.max_cmdline_length = 256;
+    repl_cfg.max_cmdline_length = 640;  // `ble inject` carries up to 244 bytes as hex
     repl_cfg.task_stack_size = 8192;
     esp_console_dev_usb_serial_jtag_config_t hw = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_console_new_repl_usb_serial_jtag(&hw, &repl_cfg, &repl), TAG, "repl");
@@ -486,7 +512,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "imu", .help = "One IMU sample", .func = cmd_imu},
         {.command = "stats", .help = "Uptime, reset reason, heap", .func = cmd_stats},
         {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
-        {.command = "rec", .help = "Record a clip: rec <seconds>", .func = cmd_rec},
+        {.command = "rec", .help = "Record a clip: rec <seconds> | rec start | rec stop", .func = cmd_rec},
         {.command = "clips", .help = "List stored clips and storage use", .func = cmd_clips},
         {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all> | clip meta <id> [redo]", .func = cmd_clip},
         {.command = "play", .help = "Play a clip on the speaker: play <id>", .func = cmd_play},

@@ -32,7 +32,7 @@ $PY scripts/cliplevels.py a.ogg b.ogg            # level distribution and 50 Hz-
 cd scripts && $PY bletest.py list                # BLE bench client (needs `ble bench` on the coin)
 ```
 
-`bletest.py` speaks PROTOCOL.md over the PC's Bluetooth adapter: `status`, `list`, `get <clip> [--regrab-at N] [--reconnect-at N] [--ack]`, `config`, `reply`, `watch`. Windows cannot type the coin's passkey through bleak, so the coin must be in bench mode (until its next reboot). The PC's RZ616 adapter currently hears the coin at about -95 dBm and catches about 3% of its advertisements, which is too weak to hold a link (see HARDWARE.md, "BLE bring-up").
+`bletest.py` speaks PROTOCOL.md over the PC's Bluetooth adapter: `status`, `list`, `get <clip> [--regrab-at N] [--reconnect-at N] [--ack]`, `config`, `reply`, `watch`, and `selftest` (error codes, ignored types, wrong/right ACK, CFG ranges, WIFI_SET refusal, multi-message LIST, and over `--serial` a GET of a clip while it records; it deletes the oldest clip). With `--serial COM9` the same exchanges run over the USB console (`ble inject`), which tests the firmware's protocol layer without the radio. Windows cannot type the coin's passkey through bleak, so the coin must be in bench mode (until its next reboot). The PC's RZ616 adapter currently hears the coin at about -95 dBm and catches about 3% of its advertisements, which is too weak to hold a link (see HARDWARE.md, "BLE bring-up").
 
 Console commands (type `help` on the console for the full list):
 

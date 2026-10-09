@@ -3,7 +3,11 @@
 Windows cannot type the coin's passkey through bleak, so this talks to a coin in bench mode
 (`ble bench` on its USB console): no pairing, an unencrypted link, until the coin reboots.
 
-Usage: python scripts/bletest.py <command> [options]
+With --serial COM9 the same exchange runs over the USB console instead of the radio: each request
+is typed as `ble inject <hex>` and the coin prints its answers and data packets as BLE-CTRL and
+BLE-DATA lines. That tests the firmware's protocol layer without a working radio link.
+
+Usage: python scripts/bletest.py [--serial COMx] <command> [options]
   status                         HELLO -> STATUS (also sets the coin's clock)
   list                           LIST -> LIST_RESULT
   get <clip> [-o out.ogg]        fetch a clip, check size, CRC-32 and the Ogg pages
@@ -16,14 +20,17 @@ Usage: python scripts/bletest.py <command> [options]
 """
 import argparse
 import asyncio
+import re
 import struct
 import sys
+import threading
 import time
 import zlib
 
 from bleak import BleakClient, BleakScanner
 
 from clipget import check_ogg
+from coinlink import open_port
 
 SERVICE = "c0a10000-f569-41ae-8676-7f5a60d835fc"
 CTRL = "c0a10001-f569-41ae-8676-7f5a60d835fc"
@@ -130,6 +137,55 @@ class Coin:
                 return clips
 
 
+class SerialCoin(Coin):
+    """The protocol over the coin's USB console (`ble inject`), for testing without the radio."""
+
+    LINE = re.compile(r"BLE-(CTRL|DATA) ([0-9a-f]+)")
+
+    def __init__(self, port, verbose=False):
+        super().__init__(verbose)
+        self.port_name = port
+        self.port = None
+        self.reader = None
+        self.running = False
+
+    async def connect(self):
+        self.port = open_port(self.port_name)
+        self.loop = asyncio.get_running_loop()
+        self.running = True
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+        print(f"console link on {self.port_name}")
+
+    def _read(self):
+        buf = b""
+        while self.running:
+            buf += self.port.read(4096)
+            *lines, buf = buf.split(b"\n")
+            for raw in lines:
+                m = self.LINE.search(raw.decode(errors="replace"))
+                if not m:
+                    continue
+                data = bytes.fromhex(m.group(2))
+                handler = self._on_ctrl if m.group(1) == "CTRL" else self._on_data
+                self.loop.call_soon_threadsafe(handler, None, data)
+
+    async def disconnect(self):
+        if self.port:
+            self.port.write(b"ble inject off\r\n")
+            await asyncio.sleep(0.2)
+            self.running = False
+            self.reader.join(timeout=1)
+            self.port.close()
+            self.port = None
+
+    async def send(self, msg_type, value=b""):
+        self.port.write(f"ble inject {tlv(msg_type, value).hex()}\r\n".encode())
+
+    async def console(self, command):
+        self.port.write(f"{command}\r\n".encode())
+
+
 async def fetch(coin, clip, buf, stop_at=None):
     """Receives packets for `clip` into buf (bytearray) until CLIP_ENDED, or until len(buf) >= stop_at."""
     await coin.send(GET, struct.pack("<HI", clip, len(buf)))
@@ -147,9 +203,7 @@ async def fetch(coin, clip, buf, stop_at=None):
         if pkt_task in done:
             c, offset, payload = pkt_task.result()
             if c != clip or offset != len(buf):
-                stray += 1  # left over from a replaced GET, or a gap
-                if c == clip and offset > len(buf):
-                    raise RuntimeError(f"gap: expected offset {len(buf)}, got {offset}")
+                stray += 1  # left over from a replaced GET or an earlier link; a gap is resumed below
             else:
                 buf += payload
         if ctrl_task in done:
@@ -186,6 +240,11 @@ async def cmd_get(coin, args):
         await coin.hello()
         print(f"   reconnected; resuming from {len(buf)}")
     ended = await fetch(coin, args.clip, buf)
+    for _ in range(3):
+        if len(buf) >= ended["size"]:
+            break
+        print(f"   CLIP_ENDED at {len(buf)} of {ended['size']} bytes: resuming with a GET from {len(buf)}")
+        ended = await fetch(coin, args.clip, buf)
     secs = time.monotonic() - t0
     crc = zlib.crc32(buf)
     ok = ended["size"] == len(buf) and ended["crc32"] == crc
@@ -205,9 +264,153 @@ async def cmd_get(coin, args):
         print(f"ACK sent; coin now has {st['pending']} pending")
 
 
+async def expect_error(coin, code, what):
+    try:
+        err = await coin.expect(ERROR, timeout=3)
+    except TimeoutError:
+        raise AssertionError(f"{what}: no ERROR")
+    assert err["code"] == code, f"{what}: ERROR code {err['code']}, wanted {code}"
+    return err
+
+
+async def expect_silence(coin, seconds=1.0):
+    try:
+        msg_type, value = await asyncio.wait_for(coin.ctrl.get(), seconds)
+    except TimeoutError:
+        return
+    raise AssertionError(f"unexpected {NAMES.get(msg_type, msg_type)} {value}")
+
+
+async def selftest(coin):
+    """Protocol edge cases. Over --serial it also records a clip and fetches it while it records."""
+    results = []
+
+    async def check(name, coro):
+        try:
+            note = await coro
+            results.append((name, True, note or ""))
+        except Exception as e:  # noqa: BLE001 - report and continue
+            results.append((name, False, f"{type(e).__name__}: {e}"))
+        while not coin.ctrl.empty():
+            coin.ctrl.get_nowait()
+
+    clips = await coin.list()
+    ids = [c["clip"] for c in clips]
+    sizes = {c["clip"]: c["size"] for c in clips}
+    assert clips, "selftest needs at least one stored clip"
+    victim = ids[0]
+
+    async def list_paging():
+        await coin.send(LIST)
+        msgs = []
+        while True:
+            r = await coin.expect(LIST_RESULT)
+            msgs.append(len(r["clips"]))
+            if not r["more"]:
+                break
+        assert sum(msgs) == len(clips) and all(n <= 34 for n in msgs), msgs
+        assert len(clips) <= 34 or len(msgs) > 1, msgs
+        return f"{len(clips)} clips in messages of {msgs}"
+
+    async def get_unknown():
+        await coin.send(GET, struct.pack("<HI", 65000, 0))
+        await expect_error(coin, 1, "GET unknown clip")
+
+    async def get_bad_offset():
+        await coin.send(GET, struct.pack("<HI", victim, sizes[victim] + 1))
+        await expect_error(coin, 2, "GET past the end")
+
+    async def bad_length():
+        await coin.send(HELLO, b"\x01")
+        await expect_error(coin, 3, "short HELLO")
+
+    async def unknown_type():
+        await coin.send(0x7F, b"\x00\x01")
+        await expect_silence(coin)
+        await coin.hello()
+
+    async def ack_wrong_crc():
+        await coin.send(ACK, struct.pack("<HI", victim, 0xDEADBEEF))
+        await expect_error(coin, 5, "ACK with a wrong CRC")
+        assert victim in [c["clip"] for c in await coin.list()], "clip deleted after a wrong ACK"
+
+    async def cfg():
+        await coin.send(CFG_SET, bytes([2]) + struct.pack("<B", 101))
+        await expect_error(coin, 5, "brightness 101")
+        await coin.send(CFG_SET, bytes([3]) + struct.pack("<H", 2))
+        await expect_error(coin, 5, "idle_timeout_s 2")
+        await coin.send(CFG_SET, bytes([2, 7, 7]))
+        await expect_error(coin, 3, "brightness with a u16")
+        await coin.send(CFG_SET, bytes([9]) + struct.pack("<H", 1))
+        await expect_error(coin, 5, "unknown key")
+        await coin.send(CFG_SET, bytes([2]) + struct.pack("<B", 100))
+        await expect_silence(coin)
+
+    async def wifi_refused():
+        await coin.send(WIFI_SET, bytes([4]) + b"test" + bytes([8]) + b"password")
+        await expect_error(coin, 5, "WIFI_SET on an unauthenticated link")
+
+    async def reply():
+        await coin.send(REPLY, struct.pack("<HB", victim, 1))
+        await coin.send(REPLY, struct.pack("<HB", victim, 2) + b"selftest reply")
+        await expect_silence(coin)
+        await coin.send(REPLY, struct.pack("<HB", victim, 9))
+        await expect_error(coin, 5, "REPLY state 9")
+
+    async def ack_right():
+        buf = bytearray()
+        ended = await fetch(coin, victim, buf)
+        assert zlib.crc32(buf) == ended["crc32"], "CRC"
+        before = len(await coin.list())
+        await coin.send(ACK, struct.pack("<HI", victim, ended["crc32"]))
+        st = await coin.expect(STATUS)
+        after = [c["clip"] for c in await coin.list()]
+        assert victim not in after and st["pending"] == before - 1, (st, before)
+        return f"clip {victim} deleted; pending {st['pending']}"
+
+    async def live_get():
+        await coin.console("rec start")
+        started = await coin.expect(CLIP_STARTED)
+        now = time.time() * 1000
+        assert abs(started["start_utc_ms"] - now) < 3000, f"start time off by {started['start_utc_ms'] - now:.0f} ms"
+        clip = started["clip"]
+        buf = bytearray()
+        await asyncio.sleep(0.5)
+        task = asyncio.ensure_future(fetch(coin, clip, buf))
+        await asyncio.sleep(2.0)
+        during = len(buf)
+        await coin.console("rec stop")
+        ended = await task
+        ok = ended["size"] == len(buf) and ended["crc32"] == zlib.crc32(buf)
+        assert ok, f"{len(buf)} bytes, crc {zlib.crc32(buf):08x}; CLIP_ENDED {ended}"
+        assert 0 < during < len(buf), f"nothing streamed while recording ({during} of {len(buf)})"
+        check_ogg(bytes(buf))
+        assert abs(ended["start_utc_ms"] - started["start_utc_ms"]) < 1000, (ended, started)
+        return (f"clip {clip}: {during} bytes streamed while recording, {len(buf)} in all, "
+                f"{ended['duration_ms']} ms, voiced {ended['voiced_ms']} ms, CRC ok")
+
+    await check("LIST pages of at most 34", list_paging())
+    await check("GET unknown clip -> ERROR 1", get_unknown())
+    await check("GET past the end -> ERROR 2", get_bad_offset())
+    await check("bad length -> ERROR 3", bad_length())
+    await check("unknown type ignored", unknown_type())
+    await check("ACK wrong CRC -> ERROR 5, clip kept", ack_wrong_crc())
+    await check("CFG_SET ranges", cfg())
+    await check("WIFI_SET refused without encryption", wifi_refused())
+    await check("REPLY states", reply())
+    await check("GET + ACK deletes", ack_right())
+    if isinstance(coin, SerialCoin):
+        await check("CLIP_STARTED + GET while recording", live_get())
+    for name, ok, note in results:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}{'  - ' + note if note else ''}")
+    if not all(ok for _, ok, _ in results):
+        sys.exit(1)
+
+
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--serial", metavar="PORT", help="run over the coin's USB console instead of BLE")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
     sub.add_parser("list")
@@ -224,11 +427,13 @@ async def main():
     r.add_argument("clip", type=int)
     r.add_argument("state", type=int)
     r.add_argument("text")
+    sub.add_parser("selftest")
     w = sub.add_parser("watch")
     w.add_argument("seconds", type=float, nargs="?", default=30)
     args = p.parse_args()
 
-    coin = Coin(verbose=args.verbose or args.cmd == "watch")
+    verbose = args.verbose or args.cmd == "watch"
+    coin = SerialCoin(args.serial, verbose) if args.serial else Coin(verbose)
     await coin.connect()
     try:
         st = await coin.hello()
@@ -251,6 +456,8 @@ async def main():
             print("REPLY sent")
         elif args.cmd == "watch":
             await asyncio.sleep(args.seconds)
+        elif args.cmd == "selftest":
+            await selftest(coin)
     finally:
         await coin.disconnect()
 
