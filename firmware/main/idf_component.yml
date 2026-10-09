@@ -2,3 +2,5 @@ dependencies:
   idf: ">=5.5"
   waveshare/esp32_s3_touch_amoled_1_75c: "^3.0.0"
   lvgl/lvgl: "9.5.0"
+  espressif/esp_audio_codec: "^2.6.2"
+  joltwallet/littlefs: "^1.22.3"

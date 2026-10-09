@@ -13,6 +13,7 @@ static lv_obj_t *s_keys;
 static lv_obj_t *s_imu;
 static lv_obj_t *s_touch;
 static lv_obj_t *s_uptime;
+static lv_obj_t *s_rec;
 static lv_obj_t *s_dot;
 static uint32_t s_touches;
 
@@ -80,6 +81,7 @@ void ui_init(void)
     s_keys = add_label(col, &lv_font_montserrat_20, fg, "PWR -  BOOT -");
     s_imu = add_label(col, &lv_font_montserrat_16, dim, "imu --");
     s_touch = add_label(col, &lv_font_montserrat_16, dim, "touch the screen");
+    s_rec = add_label(col, &lv_font_montserrat_20, fg, "hold PWR to record");
     s_uptime = add_label(col, &lv_font_montserrat_16, dim, "");
 
     s_dot = lv_obj_create(scr);
@@ -118,4 +120,17 @@ void ui_update(const ui_state_t *st)
         lv_label_set_text(s_imu, "IMU not responding");
     }
     lv_label_set_text_fmt(s_uptime, "up %lus", (unsigned long)st->uptime_s);
+
+    if (st->recording) {
+        lv_label_set_text_fmt(s_rec, "REC %lus  level %d", (unsigned long)st->rec_seconds, st->mic_level);
+        lv_obj_set_style_text_color(s_rec, lv_color_hex(0xFF4040), 0);
+    } else {
+        if (st->last_clip) {
+            lv_label_set_text_fmt(s_rec, "clip %u saved, %lu.%lus", st->last_clip, (unsigned long)(st->last_clip_ms / 1000),
+                                  (unsigned long)(st->last_clip_ms % 1000 / 100));
+        } else {
+            lv_label_set_text_fmt(s_rec, "hold PWR to record  (mic %d)", st->mic_level);
+        }
+        lv_obj_set_style_text_color(s_rec, lv_color_hex(0xE8E8E8), 0);
+    }
 }

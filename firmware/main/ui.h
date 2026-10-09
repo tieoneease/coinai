@@ -16,6 +16,11 @@ typedef struct {
     uint32_t pwr_presses;
     uint32_t boot_presses;
     uint32_t uptime_s;
+    bool recording;
+    int mic_level;           // 0..100
+    uint32_t rec_seconds;
+    uint16_t last_clip;      // 0 = none yet
+    uint32_t last_clip_ms;
 } ui_state_t;
 
 // Both must be called with the display lock held.

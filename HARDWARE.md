@@ -152,3 +152,12 @@ Meanings per XPowersLib; datasheet not checked.
 - Battery 4127 mV at 100 %, charger "done" on USB (VBUS 4988 mV, VSYS 4339 mV).
 - IMU at rest |a| = 1.04 g; gyro zero-rate offset is about ±9 dps uncalibrated.
 - Display plus touch bring-up includes a 1.2 s stall with an `i2c.master` pull-up warning (seen with Waveshare's demo too). It matters for the phase 3 boot path.
+
+## Audio bring-up (2026-10-09)
+
+- **Microphones:** esp_codec_dev's ES7210 driver selects MIC1 + MIC2 when `mic_selected` is 0, which is how the BSP sets it. A 2-channel stream is therefore the two microphones, never the MIC3 echo reference.
+- **Loopback** (`loopback 1000`: speaker tone recorded through the mics, decoded by Chromium): the 1 kHz tone reaches −10 dBFS (peak 0.36, no clipping) at speaker volume 70 and 24 dB mic gain, 65 dB above a 700 Hz control. The noise floor is about −70 dBFS.
+- **Encoding:** Opus 24 kbps VoIP VBR at complexity 2 takes 3.8–4.2 ms on average (5.4 ms worst case) per 20 ms frame. A quiet-room clip comes to about 19 kbps.
+- **Capture stack:** the Opus encoder peaks at about 23.8 KB, so the capture task has 32 KB.
+- **Internal RAM after audio:** 56 KB free, with a dip to 13 KB at some point. This must be fixed before BLE (phase 4); move buffers and possibly stacks to PSRAM.
+- **Amplifier:** opening the ES8311 switches the amplifier (GPIO46) on. The firmware keeps it off and the DAC muted except during playback.

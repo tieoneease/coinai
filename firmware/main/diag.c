@@ -5,13 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "audio.h"
 #include "bsp/esp-bsp.h"
+#include "clipstore.h"
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_heap_caps.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "imu.h"
 #include "lvgl.h"
 #include "pmic.h"
@@ -147,6 +151,127 @@ static int cmd_fbdump(int argc, char **argv)
     return 0;
 }
 
+static int cmd_rec(int argc, char **argv)
+{
+    int seconds = argc > 1 ? atoi(argv[1]) : 3;
+    if (seconds < 1 || seconds > 600) {
+        printf("usage: rec <seconds 1-600>\n");
+        return 1;
+    }
+    audio_rec_start();
+    vTaskDelay(pdMS_TO_TICKS(seconds * 1000));
+    audio_rec_stop(false);
+    vTaskDelay(pdMS_TO_TICKS(300));  // let the capture task finalise; its log line has the result
+    return 0;
+}
+
+// Speaker -> microphones self-test: the clip should contain the tone between 0.5 and 1.5 s.
+static int cmd_loopback(int argc, char **argv)
+{
+    int hz = argc > 1 ? atoi(argv[1]) : 1000;
+    audio_rec_start();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_err_t err = audio_tone(hz, 1000);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    audio_rec_stop(false);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    printf("loopback %d Hz: %s\n", hz, esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_clips(int argc, char **argv)
+{
+    static clip_info_t list[128];
+    int n = clipstore_list(list, 128);
+    for (int i = 0; i < n; i++) {
+        printf("%5u  %7lu bytes\n", list[i].id, (unsigned long)list[i].size);
+    }
+    size_t total = 0, used = 0;
+    clipstore_usage(&total, &used);
+    printf("%d clips; storage %u KB used of %u KB\n", n, (unsigned)(used / 1024), (unsigned)(total / 1024));
+    return 0;
+}
+
+// clip get <id>: base64 between CLIP-BEGIN/CLIP-END (scripts/clipget.py). clip rm <id|all>.
+static int cmd_clip(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "get") == 0) {
+        char path[32];
+        clipstore_path((uint16_t)atoi(argv[2]), path, sizeof path);
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+            printf("no such clip\n");
+            return 1;
+        }
+        esp_log_level_set("*", ESP_LOG_NONE);
+        printf("CLIP-BEGIN %s\n", argv[2]);
+        uint8_t chunk[57];
+        char line[80];
+        uint32_t crc = 0, size = 0;
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) {
+            crc = esp_rom_crc32_le(crc, chunk, n);
+            size += n;
+            base64_line(chunk, n, line);
+            puts(line);
+        }
+        fclose(f);
+        printf("CLIP-END %08" PRIx32 " %" PRIu32 "\n", crc, size);
+        fflush(stdout);
+        esp_log_level_set("*", CONFIG_LOG_DEFAULT_LEVEL);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "rm") == 0) {
+        if (strcmp(argv[2], "all") == 0) {
+            static clip_info_t list[128];
+            int n = clipstore_list(list, 128);
+            for (int i = 0; i < n; i++) {
+                clipstore_remove(list[i].id);
+            }
+            printf("removed %d clips\n", n);
+            return 0;
+        }
+        esp_err_t err = clipstore_remove((uint16_t)atoi(argv[2]));
+        printf("%s\n", err == ESP_OK ? "removed" : "no such clip");
+        return err == ESP_OK ? 0 : 1;
+    }
+    printf("usage: clip get <id> | clip rm <id|all>\n");
+    return 1;
+}
+
+static int cmd_play(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: play <clip id>\n");
+        return 1;
+    }
+    esp_err_t err = audio_play_clip((uint16_t)atoi(argv[1]));
+    printf("%s\n", err == ESP_OK ? "played" : esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tone(int argc, char **argv)
+{
+    int hz = argc > 1 ? atoi(argv[1]) : 1000;
+    int ms = argc > 2 ? atoi(argv[2]) : 500;
+    if (hz < 50 || hz > 7000 || ms < 10 || ms > 5000) {
+        printf("usage: tone [hz 50-7000] [ms 10-5000]\n");
+        return 1;
+    }
+    return audio_tone(hz, ms) == ESP_OK ? 0 : 1;
+}
+
+static int cmd_level(int argc, char **argv)
+{
+    printf("mic peak level (0-100), 10 x 200 ms:");
+    for (int i = 0; i < 10; i++) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        printf(" %d", audio_level());
+    }
+    printf("\n");
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     esp_restart();
@@ -170,6 +295,13 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "imu", .help = "One IMU sample", .func = cmd_imu},
         {.command = "stats", .help = "Uptime, reset reason, heap", .func = cmd_stats},
         {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
+        {.command = "rec", .help = "Record a clip: rec <seconds>", .func = cmd_rec},
+        {.command = "clips", .help = "List stored clips and storage use", .func = cmd_clips},
+        {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all>", .func = cmd_clip},
+        {.command = "play", .help = "Play a clip on the speaker: play <id>", .func = cmd_play},
+        {.command = "tone", .help = "Speaker test tone: tone [hz] [ms]", .func = cmd_tone},
+        {.command = "level", .help = "Microphone peak level for 2 s", .func = cmd_level},
+        {.command = "loopback", .help = "Record while playing a tone: loopback [hz]", .func = cmd_loopback},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
     };
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
