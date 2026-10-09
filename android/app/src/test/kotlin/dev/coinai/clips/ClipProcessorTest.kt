@@ -46,7 +46,8 @@ class ClipProcessorTest {
     @Volatile private var transcribeResponse = json(200, """{"text":"turn on the lights"}""")
     @Volatile private var promptResponse: () -> MockResponse = { json(200, """{"ok":true,"steered":false,"lane":"web","sessionId":"s"}""") }
     @Volatile private var replyText = "**Done.** The lights are on."
-    @Volatile private var eventsBroken = false
+    /** When set, GET /events answers with this response instead of a stream. */
+    @Volatile private var eventsError: MockResponse? = null
 
     private val store by lazy { MemoryClips(tmp.root) }
     private val notified = CopyOnWriteArrayList<Pair<Long, String>>()
@@ -76,7 +77,7 @@ class ClipProcessorTest {
                     promptSeen.release()
                     promptResponse()
                 }
-                "/events" -> if (eventsBroken) json(503, """{"error":"restarting"}""") else MockResponse.Builder()
+                "/events" -> eventsError ?: MockResponse.Builder()
                     .addHeader("Content-Type", "text/event-stream")
                     .body(object : MockResponseBody {
                         override val contentLength = -1L
@@ -232,13 +233,19 @@ class ClipProcessorTest {
 
     @Test
     fun promptNotSentIsReleasedAndRetried() = runBlocking {
-        eventsBroken = true
+        eventsError = json(503, """{"error":"restarting"}""")
         val clip = received(state = ClipState.TRANSCRIBED, transcript = "hello")
 
         val outcome = processor.process(clip.id)
 
         assertTrue(outcome is ClipProcessor.Outcome.Retry)
         assertEquals(ClipState.TRANSCRIBED, state(clip.id))
+        assertEquals(0, prompts.get())
+
+        // A refused event stream (bad token) will not change on retry.
+        eventsError = json(401, """{"error":"bad token"}""")
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id))
+        assertEquals(ClipState.FAILED, state(clip.id))
         assertEquals(0, prompts.get())
     }
 

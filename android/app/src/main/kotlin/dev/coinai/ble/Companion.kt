@@ -1,5 +1,6 @@
 package dev.coinai.ble
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.le.ScanFilter
 import android.companion.AssociationInfo
@@ -92,6 +93,10 @@ class CoinPresenceService : CompanionDeviceService() {
         if (event.event != DevicePresenceEvent.EVENT_BLE_APPEARED && event.event != DevicePresenceEvent.EVENT_BT_CONNECTED) return
         val info = CoinPairing.associations(this).firstOrNull { it.id == event.associationId } ?: return
         val address = CoinPairing.address(info) ?: return
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(CoinPairing.TAG, "coin $address present, but Nearby devices permission is not granted")
+            return
+        }
         Log.i(CoinPairing.TAG, "coin $address present (event ${event.event})")
         SyncService.start(this, address)
     }

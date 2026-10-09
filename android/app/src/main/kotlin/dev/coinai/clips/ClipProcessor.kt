@@ -132,7 +132,7 @@ class ClipProcessor(
             api.ask(text, lane = config.lane, timeout = config.askTimeout)
         } catch (e: PromptNotSentException) {
             store.releasePrompt(clip.id)
-            return retryOrFail(clip, config, attempt, "prompt not sent: ${e.message}", permanent = false)
+            return retryOrFail(clip, config, attempt, "prompt not sent: ${e.message}", permanent = e.isPermanent())
         } catch (e: PromptOutcomeUnknownException) {
             store.setState(clip.id, ClipState.UNCERTAIN, e.message)
             replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.FAILED, UNCERTAIN_TEXT))

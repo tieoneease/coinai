@@ -1,11 +1,9 @@
 package dev.coinai.ble
 
-import android.Manifest
 import android.app.Service
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import dev.coinai.app.CoinaiApp
@@ -41,11 +39,18 @@ class SyncService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // startForeground must follow startForegroundService promptly, even when there is nothing to do.
-        startForeground(Notifications.SYNC_ID, Notifications.sync(this, "Syncing with your coin"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        // startForeground must follow startForegroundService promptly, even when there is nothing
+        // to do. The connectedDevice type needs BLUETOOTH_CONNECT; without it the call throws.
+        try {
+            startForeground(Notifications.SYNC_ID, Notifications.sync(this, "Syncing with your coin"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } catch (e: SecurityException) {
+            app.log("cannot sync: ${e.message}")
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val address = intent?.getStringExtra(EXTRA_ADDRESS)
         if (job?.isActive == true) return START_NOT_STICKY
-        if (address == null || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+        if (address == null) {
             finish()
             return START_NOT_STICKY
         }
