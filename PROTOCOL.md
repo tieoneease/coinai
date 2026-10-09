@@ -18,14 +18,13 @@ The intervals follow Apple's Accessory Design Guidelines §58.5. They are harmle
 ## Security
 
 - **Pairing:** LE Secure Connections with bonding and MITM protection. The device shows a 6-digit passkey on its screen (IO capability DisplayOnly), and the user types it on the phone.
-- **Access:** service discovery is open. Characteristic values require authenticated encryption, and a read or write before pairing fails with "Insufficient Authentication", which starts pairing.
-- **Addresses:** the device uses resolvable private addresses once bonded. Android's companion presence detection needs a bonded device for that.
-- **Dev builds:** a build flag relaxes security for bench testing. Release builds never ship with it.
+- **Access:** service discovery is open. A write to `ctrl` before the link is encrypted with an authenticated (MITM) key fails with "Insufficient Authentication", which starts pairing, and the device sends nothing on `ctrl` or `data` to such a link. The CCCDs can be written before pairing.
+- **Addresses:** the device uses resolvable private addresses once bonded. Android's companion presence detection needs a bonded device for that. *Firmware status: the first build advertises with its public identity address; RPAs wait until companion presence detection has been tested with them on the phone.*
+- **Bench mode:** `ble bench` on the USB console lets an unpaired, unencrypted link use the protocol until the next reboot, for PC test clients that cannot enter a passkey. `STATUS` then reports `fw_version` with a `-bench` suffix. `WIFI_SET` is refused (`ERROR` code 5) on any link that is not encrypted and authenticated, bench mode included.
 
 ## Link
 
-- Data length update to 251 first, then MTU 247.
-- Request 2M PHY.
+- Data length update to 251 first, then MTU 247. The device starts the data length update and the 2M PHY request after connecting; the phone, as GATT client, requests the 247-byte MTU.
 - During transfer: connection interval 15 ms (min = max), latency 0, supervision timeout 6 s.
 - Idle: let the central choose the parameters.
 
@@ -70,7 +69,7 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 | `0x03` | `GET` | `clip u16`, `offset u32` |
 | `0x04` | `ACK` | `clip u16`, `crc32 u32` |
 | `0x05` | `WIFI_SET` | `ssid_len u8`, `ssid` (\≤ 32 bytes), `pass_len u8`, `password` (\≤ 64 bytes) |
-| `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16`, `0x02` brightness `u8`, `0x03` idle_timeout_s `u16`, `0x04` off_after_h `u16` |
+| `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16` (0–600, default 45), `0x02` brightness `u8` (percent, 1–100, default 100), `0x03` idle_timeout_s `u16` (5–3600, default 30), `0x04` off_after_h `u16` (0–720, 0 = never, default 0). Stored on the device; out of range → `ERROR` code 5 |
 | `0x07` | `REPLY` | `clip u16`, `state u8` (0 transcribing, 1 thinking, 2 done, 3 failed), `text` (\≤ 200 bytes) |
 | `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording), `pending u16`, `fw_version` (\≤ 32 bytes) |
 | `0x82` | `CLIP_STARTED` | `clip u16`, `codec u8` (1 = Ogg Opus), `sample_rate u32`, `start_utc_ms u64` (0 = unknown) |

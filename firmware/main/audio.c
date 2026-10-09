@@ -1,8 +1,10 @@
 #include "audio.h"
+#include "esp_attr.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "bsp/esp-bsp.h"
 #include "clipstore.h"
 #include "driver/gpio.h"
@@ -49,19 +51,31 @@ static TaskHandle_t s_capture_task;
 
 static volatile bool s_start_req, s_stop_req, s_discard_req;
 static volatile bool s_recording;
+// The clip whose file is open: set before recording starts, cleared only once the file is final
+// (EOS page and .met written) or removed. Readers must not treat it as a cut-off clip.
+static volatile uint16_t s_open_clip;
 static volatile int s_level;
 static volatile bool s_shutdown_req;
 static SemaphoreHandle_t s_shutdown_done;
 static volatile uint64_t s_first_frame_ticks;
 
 // Owned by the capture task.
-static int16_t s_preroll[PREROLL_FRAMES][FRAME_SAMPLES];
+EXT_RAM_BSS_ATTR static int16_t s_preroll[PREROLL_FRAMES][FRAME_SAMPLES];
 static bool s_preroll_voiced[PREROLL_FRAMES];
 static float s_floor_db = VAD_FLOOR_INIT;
 static uint32_t s_voiced_frames;
 static uint64_t s_open_ticks;
+static uint64_t s_start_utc_ms;
+
+// Wall-clock ms once the phone has set the clock (HELLO), else 0.
+static uint64_t utc_now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec > 1700000000 ? (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
+}
 static int s_pre_next, s_pre_count;
-static ogg_opus_writer_t s_ogg;
+EXT_RAM_BSS_ATTR static ogg_opus_writer_t s_ogg;
 static FILE *s_file;
 static uint16_t s_clip_id;
 static uint32_t s_frames;
@@ -70,6 +84,11 @@ static int64_t s_enc_us_total, s_enc_us_max;
 bool audio_is_recording(void)
 {
     return s_recording;
+}
+
+uint16_t audio_recording_clip(void)
+{
+    return s_open_clip;
 }
 
 int audio_level(void)
@@ -135,6 +154,7 @@ static void begin_clip(void)
 {
     char path[32];
     s_clip_id = clipstore_next_id();
+    s_open_clip = s_clip_id;  // before the file exists
     clipstore_path(s_clip_id, path, sizeof path);
     s_file = fopen(path, "wb");
     if (!s_file || ogg_opus_begin(&s_ogg, s_file, esp_random(), OPUS_PRE_SKIP, SAMPLE_RATE) != ESP_OK) {
@@ -142,7 +162,9 @@ static void begin_clip(void)
         if (s_file) {
             fclose(s_file);
             s_file = NULL;
+            clipstore_remove(s_clip_id);
         }
+        s_open_clip = 0;
         return;
     }
     esp_opus_enc_reset(s_enc);
@@ -158,7 +180,13 @@ static void begin_clip(void)
         encode_frame(s_preroll[k], s_preroll_voiced[k]);
     }
     s_pre_count = 0;
+    uint64_t now = utc_now_ms();
+    s_start_utc_ms = now ? now - (uint64_t)s_frames * 20 : 0;  // s_frames = pre-roll frames already encoded
     ESP_LOGI(TAG, "clip %u recording", s_clip_id);
+    if (s_cb) {
+        audio_clip_result_t started = {.id = s_clip_id};
+        s_cb(&started, true, s_cb_ctx);
+    }
 }
 
 static void finish_clip(bool discard)
@@ -166,6 +194,7 @@ static void finish_clip(bool discard)
     audio_clip_result_t res = {.id = s_clip_id, .discarded = discard, .open_ticks = s_open_ticks};
     s_recording = false;
     if (!s_file) {
+        s_open_clip = 0;
         return;
     }
     if (!discard) {
@@ -187,14 +216,20 @@ static void finish_clip(bool discard)
         res.duration_ms = s_frames * 20;
         res.voiced_ms = s_voiced_frames * 20;
         res.crc32 = s_ogg.crc32;
+        clip_meta_t meta = {.size = res.size, .duration_ms = res.duration_ms, .voiced_ms = res.voiced_ms,
+                            .crc32 = res.crc32, .start_utc_ms = s_start_utc_ms};
+        if (clipstore_put_meta(s_clip_id, &meta) != ESP_OK) {
+            ESP_LOGE(TAG, "clip %u: metadata not saved", s_clip_id);
+        }
         ESP_LOGI(TAG, "clip %u: %lu bytes, %lu ms (voiced %lu), crc %08lx; encode avg %lld us max %lld us; stack free %u",
                  s_clip_id, (unsigned long)res.size, (unsigned long)res.duration_ms, (unsigned long)res.voiced_ms,
                  (unsigned long)res.crc32,
                  s_frames ? s_enc_us_total / s_frames : 0, s_enc_us_max,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
+    s_open_clip = 0;
     if (s_cb) {
-        s_cb(&res, s_cb_ctx);
+        s_cb(&res, false, s_cb_ctx);
     }
 }
 
@@ -242,7 +277,7 @@ static void capture_task(void *arg)
                 ESP_LOGI(TAG, "recording cancelled before the first frame");
                 if (s_cb) {
                     audio_clip_result_t none = {.discarded = true};  // id 0: no clip was created
-                    s_cb(&none, s_cb_ctx);
+                    s_cb(&none, false, s_cb_ctx);
                 }
             } else {
                 begin_clip();
@@ -334,7 +369,9 @@ esp_err_t audio_init(audio_clip_cb_t cb, void *ctx)
     esp_opus_enc_get_frame_size(s_enc, &in_size, &out_size);
     ESP_RETURN_ON_FALSE(in_size == FRAME_SAMPLES * 2, ESP_FAIL, TAG, "unexpected Opus frame size %d", in_size);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(capture_task, "capture", CAPTURE_STACK, NULL, 18, &s_capture_task, 0);
+    // Stack in PSRAM (see sdkconfig.defaults): 32 KB of internal RAM is too much to spend here.
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(capture_task, "capture", CAPTURE_STACK, NULL, 18, &s_capture_task,
+                                                    0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "capture task");
     ESP_LOGI(TAG, "audio ready: 16 kHz, 2 mics, Opus %d bps VoIP", OPUS_BITRATE);
     return ESP_OK;

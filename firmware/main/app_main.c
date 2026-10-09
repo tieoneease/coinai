@@ -1,10 +1,12 @@
-// coinai firmware, phase 3: push-to-talk from Active, Standby and Off.
+// coinai firmware: push-to-talk from Active, Standby and Off; clips go to the phone over BLE.
 //
-// PWR hold = record. PWR tap = standby (from Active) or screen on (from standby).
-// BOOT held, then PWR held 3 s = power off. A wake by PWR that is still held records at once.
+// PWR hold = record. PWR tap = standby once the phone has its clips (from Active) or screen on
+// (from standby). BOOT held, then PWR held 3 s = power off. A wake by PWR that is still held
+// records at once.
 
 #include <inttypes.h>
 #include "audio.h"
+#include "ble.h"
 #include "bsp/esp-bsp.h"
 #include "clipstore.h"
 #include "diag.h"
@@ -20,6 +22,7 @@
 #include "nvs_flash.h"
 #include "pmic.h"
 #include "power.h"
+#include "settings.h"
 #include "ui.h"
 
 static const char *TAG = "coinai";
@@ -31,10 +34,13 @@ static const char *TAG = "coinai";
 // A ptttest wake records this long, standing in for a PWR hold.
 #define TEST_HOLD_MS        1500
 #define TEST_SLEEP_S        1
-// Idle time before standby after a wake that recorded (phase 4 turns this into the BLE reply window).
+// Idle time before standby after a wake that recorded, once the phone has the clip and the
+// reply window is over.
 #define LINGER_S            10
-// Idle time before standby on battery, or before the screen goes off on USB power.
-#define IDLE_S              30
+// How long the coin stays awake for the phone after a clip while clips are pending.
+#define DELIVERY_S          60
+// After a PWR tap, how long to wait for a phone that has not connected yet.
+#define TAP_DELIVERY_S      10
 #define POWEROFF_COMBO_MS   3000
 // A wake by PWR counts as a tap (screen on, no clip) when the whole press is shorter than this.
 #define WAKE_TAP_MS         300
@@ -71,8 +77,12 @@ static void post(ctl_type_t type, const audio_clip_result_t *clip)
     xQueueSend(s_ctl, &m, 0);
 }
 
-static void on_clip(const audio_clip_result_t *clip, void *ctx)
+static void on_clip(const audio_clip_result_t *clip, bool started, void *ctx)
 {
+    ble_clip_event(clip, started);
+    if (started) {
+        return;
+    }
     if (!clip->discarded) {
         s_last_clip_ms = clip->duration_ms;
         s_last_clip = clip->id;
@@ -169,6 +179,10 @@ static void status_task(void *arg)
         st.rec_seconds = st.recording ? (uint32_t)((now - s_rec_started_us) / 1000000) : 0;
         st.last_clip = s_last_clip;
         st.last_clip_ms = s_last_clip_ms;
+        ble_note_device_status(st.pmic_ok && st.pmic.battery_present ? st.pmic.battery_pct : -1,
+                               st.pmic_ok && st.pmic.charging,
+                               s_vbus, st.recording);
+        ble_get_status(&st.ble);
 
         if (bsp_display_lock(100) == ESP_OK) {
             ui_update(&st);
@@ -205,17 +219,30 @@ static void log_wake_recording(const audio_clip_result_t *clip)
 }
 
 // Owns standby and power-off decisions; runs on the main task after start-up.
+//
+// The coin stays awake while it records, while the phone is fetching clips or waiting for
+// SamBot's reply (ble_busy), and for DELIVERY_S after a clip while clips are pending. Otherwise:
+// standby after the idle time on battery, screen off on USB power.
 static void control_loop(lv_display_t *disp)
 {
     bool wake_clip_pending = power_wake_records(s_wake);
     bool linger = wake_clip_pending;  // short idle timeout, then standby even on USB
     bool screen_off = false;
+    bool standby_asap = false;        // PWR tap: standby as soon as the phone is served
+    int64_t standby_req_us = 0;
+    int64_t deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
+    int last_reply_state = -1;
+    uint16_t last_reply_clip = 0;
     for (;;) {
         ctl_msg_t m;
         if (xQueueReceive(s_ctl, &m, pdMS_TO_TICKS(250)) == pdTRUE) {
             switch (m.type) {
             case CTL_CLIP:
                 s_last_activity_us = esp_timer_get_time();
+                if (m.clip.id && !m.clip.discarded) {
+                    deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
+                    ble_set_adv_mode(BLE_ADV_DELIVER);
+                }
                 if (!wake_clip_pending) {
                     break;
                 }
@@ -232,7 +259,10 @@ static void control_loop(lv_display_t *disp)
                 }
                 break;
             case CTL_STANDBY:
-                power_enter_standby(0, false);
+                standby_asap = true;
+                standby_req_us = esp_timer_get_time();
+                display_set_brightness(0);
+                screen_off = true;
                 break;
             case CTL_POWEROFF:
                 power_off();
@@ -244,16 +274,45 @@ static void control_loop(lv_display_t *disp)
         }
 
         int64_t now = esp_timer_get_time();
+        ble_status_t bs;
+        ble_get_status(&bs);
+        if (bs.reply_state != last_reply_state || bs.reply_clip != last_reply_clip) {
+            last_reply_state = bs.reply_state;
+            last_reply_clip = bs.reply_clip;
+            s_last_activity_us = now;  // a reply arrived: give the user time to read it
+            standby_asap = false;
+        }
+        if (bs.pending == 0 && !audio_is_recording()) {
+            ble_set_adv_mode(BLE_ADV_IDLE);
+        }
         int64_t idle_ms = (now - s_last_activity_us) / 1000;
         if (disp && bsp_display_lock(50) == ESP_OK) {
             int64_t lv_idle = lv_display_get_inactive_time(disp);
             bsp_display_unlock();
             idle_ms = lv_idle < idle_ms ? lv_idle : idle_ms;
         }
-        if (audio_is_recording() || s_wake_hold) {
+        if (standby_asap && idle_ms + 300 < (now - standby_req_us) / 1000) {
+            standby_asap = false;  // touched or pressed again since the tap
+        }
+        bool delivering = bs.pending > 0 && now < deliver_until_us;
+        if (standby_asap) {
+            // After a tap only the transfer itself is waited for: no reply window, and at most
+            // TAP_DELIVERY_S for a phone that has not connected yet.
+            delivering = delivering && (bs.connected || now - standby_req_us < TAP_DELIVERY_S * 1000000LL);
+            if (!(audio_is_recording() || s_wake_hold || bs.passkey || delivering)) {
+                power_enter_standby(0, false);
+            }
             continue;
         }
-        int64_t limit_ms = (linger ? LINGER_S : IDLE_S) * 1000LL;
+        bool keep_awake = audio_is_recording() || s_wake_hold || ble_busy() || bs.passkey || delivering;
+        if (keep_awake) {
+            if (screen_off && idle_ms < 1000) {
+                display_set_brightness(settings_get(SET_BRIGHTNESS));
+                screen_off = false;
+            }
+            continue;
+        }
+        int64_t limit_ms = (linger ? LINGER_S : settings_get(SET_IDLE_S)) * 1000LL;
         if (idle_ms >= limit_ms) {
             if (linger || !s_vbus) {
                 power_enter_standby(0, false);
@@ -263,7 +322,7 @@ static void control_loop(lv_display_t *disp)
                 screen_off = true;
             }
         } else if (screen_off && idle_ms < 1000) {
-            display_set_brightness(100);
+            display_set_brightness(settings_get(SET_BRIGHTNESS));
             screen_off = false;
         }
     }
@@ -288,6 +347,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    settings_load();
     if (clipstore_init() != ESP_OK) {
         ESP_LOGE(TAG, "clip storage unavailable");
     }
@@ -303,6 +363,7 @@ void app_main(void)
         ESP_LOGE(TAG, "audio init failed");
     }
     int64_t audio_ready_ms = esp_timer_get_time() / 1000;
+    diag_mem_mark("audio");
 
     // Everything else.
     ESP_LOGI(TAG, "wake: %s, reset reason %d", power_wake_name(s_wake), (int)esp_reset_reason());
@@ -323,16 +384,32 @@ void app_main(void)
         esp_timer_start_once(s_test_timer, TEST_HOLD_MS * 1000);
     }
 
+    diag_mem_mark("imu");
     lv_display_t *disp = display_start();
+    diag_mem_mark("display");
     if (!disp) {
         ESP_LOGE(TAG, "display start failed");
-    } else if (bsp_display_lock(1000) == ESP_OK) {
-        ui_init();
-        bsp_display_unlock();
+    } else {
+        display_set_brightness(settings_get(SET_BRIGHTNESS));
+        if (bsp_display_lock(1000) == ESP_OK) {
+            ui_init();
+            bsp_display_unlock();
+        }
+    }
+    diag_mem_mark("ui");
+    esp_err_t ble_err = ble_init();
+    diag_mem_mark("ble");
+    if (ble_err == ESP_OK) {
+        ble_status_t bs;
+        ble_get_status(&bs);
+        ble_set_adv_mode(record || bs.pending ? BLE_ADV_DELIVER : BLE_ADV_IDLE);
+    } else {
+        ESP_LOGE(TAG, "BLE init failed");
     }
     s_last_activity_us = esp_timer_get_time();
-    xTaskCreatePinnedToCore(status_task, "status", 4096, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCoreWithCaps(status_task, "status", 4096, NULL, 5, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_ERROR_CHECK(diag_start(bus));
+    diag_mem_mark("diag");
     ESP_LOGI(TAG, "audio ready at %lld ms, all ready at %lld ms (esp_timer)", audio_ready_ms,
              esp_timer_get_time() / 1000);
     control_loop(disp);

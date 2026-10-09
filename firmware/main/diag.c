@@ -6,8 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include "audio.h"
+#include "ble.h"
 #include "bsp/esp-bsp.h"
 #include "clipstore.h"
+#include "esp_attr.h"
+#include "esp_memory_utils.h"
+#include "esp_cpu_utils.h"
+#include "esp_debug_helpers.h"
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_heap_caps.h"
@@ -91,8 +96,82 @@ static int cmd_imu(int argc, char **argv)
     return 0;
 }
 
+typedef struct {
+    const char *step;
+    uint32_t ms, free, min, largest;
+} mem_mark_t;
+static mem_mark_t s_marks[12];
+static int s_nmarks;
+
+void diag_mem_mark(const char *step)
+{
+    if (s_nmarks < (int)(sizeof s_marks / sizeof s_marks[0])) {
+        s_marks[s_nmarks++] = (mem_mark_t){
+            .step = step,
+            .ms = (uint32_t)(esp_timer_get_time() / 1000),
+            .free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            .min = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+            .largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        };
+    }
+}
+
+// Large internal-RAM allocations (CONFIG_HEAP_USE_HOOKS): who takes the internal heap, and when.
+typedef struct {
+    uint32_t size, ms;
+    char task[12];
+    uint32_t pc[6];
+} big_alloc_t;
+static big_alloc_t s_big[24];
+static volatile uint32_t s_nbig;
+#define BIG_ALLOC 2048
+
+void esp_heap_trace_alloc_hook(void *ptr, size_t size, uint32_t caps)
+{
+    if (size < BIG_ALLOC || !esp_ptr_internal(ptr)) {
+        return;
+    }
+    uint32_t i = s_nbig++;
+    if (i < sizeof s_big / sizeof s_big[0]) {
+        big_alloc_t *b = &s_big[i];
+        b->size = size;
+        b->ms = (uint32_t)(esp_timer_get_time() / 1000);
+        const char *name = xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED ? "-" : pcTaskGetName(NULL);
+        strlcpy(b->task, name ? name : "?", sizeof b->task);
+        esp_backtrace_frame_t f;
+        esp_backtrace_get_start(&f.pc, &f.sp, &f.next_pc);
+        for (int d = 0; d < 6; d++) {
+            b->pc[d] = 0;
+            if (!f.next_pc || !esp_backtrace_get_next_frame(&f)) {
+                break;
+            }
+            b->pc[d] = esp_cpu_process_stack_pc(f.pc);
+        }
+    }
+}
+
 static int cmd_stats(int argc, char **argv)
 {
+    uint32_t nbig = s_nbig;
+    for (uint32_t i = 0; i < nbig && i < sizeof s_big / sizeof s_big[0]; i++) {
+        printf("internal alloc %6lu B at %6lu ms by %s:", (unsigned long)s_big[i].size, (unsigned long)s_big[i].ms,
+               s_big[i].task);
+        for (int d = 0; d < 6 && s_big[i].pc[d]; d++) {
+            printf(" %08lx", (unsigned long)s_big[i].pc[d]);
+        }
+        printf("\n");
+    }
+    if (nbig > sizeof s_big / sizeof s_big[0]) {
+        printf("(%lu large internal allocations in all)\n", (unsigned long)nbig);
+    }
+    for (int i = 0; i < s_nmarks; i++) {
+        printf("boot %-14s %5lu ms: internal free %6lu min %6lu largest %6lu\n", s_marks[i].step,
+               (unsigned long)s_marks[i].ms, (unsigned long)s_marks[i].free, (unsigned long)s_marks[i].min,
+               (unsigned long)s_marks[i].largest);
+    }
+    printf("largest internal block %u, DMA-capable free %u\n",
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
     printf("uptime %.1f s; reset reason %d\n", esp_timer_get_time() / 1e6, (int)esp_reset_reason());
     printf("internal free %u (min %u); PSRAM free %u (min %u)\n",
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -182,7 +261,7 @@ static int cmd_loopback(int argc, char **argv)
 
 static int cmd_clips(int argc, char **argv)
 {
-    static clip_info_t list[128];
+    EXT_RAM_BSS_ATTR static clip_info_t list[128];
     int n = clipstore_list(list, 128);
     for (int i = 0; i < n; i++) {
         printf("%5u  %7lu bytes\n", list[i].id, (unsigned long)list[i].size);
@@ -224,7 +303,7 @@ static int cmd_clip(int argc, char **argv)
     }
     if (argc == 3 && strcmp(argv[1], "rm") == 0) {
         if (strcmp(argv[2], "all") == 0) {
-            static clip_info_t list[128];
+            EXT_RAM_BSS_ATTR static clip_info_t list[128];
             int n = clipstore_list(list, 128);
             for (int i = 0; i < n; i++) {
                 clipstore_remove(list[i].id);
@@ -236,7 +315,25 @@ static int cmd_clip(int argc, char **argv)
         printf("%s\n", err == ESP_OK ? "removed" : "no such clip");
         return err == ESP_OK ? 0 : 1;
     }
-    printf("usage: clip get <id> | clip rm <id|all>\n");
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "meta") == 0) {
+        uint16_t id = (uint16_t)atoi(argv[2]);
+        if (argc == 4 && strcmp(argv[3], "redo") == 0) {
+            clipstore_drop_meta(id);  // as if power was lost before the clip was finalised
+        }
+        clip_meta_t m;
+        bool complete = false;
+        esp_err_t err = clipstore_get_meta(id, audio_recording_clip(), &m, &complete);
+        if (err != ESP_OK) {
+            printf("no such clip\n");
+            return 1;
+        }
+        printf("clip %u: %s, %lu bytes, %lu ms, voiced %ld, crc %08lx, start %llu\n", id,
+               complete ? "complete" : "recording", (unsigned long)m.size, (unsigned long)m.duration_ms,
+               m.voiced_ms == CLIP_VOICED_UNKNOWN ? -1L : (long)m.voiced_ms, (unsigned long)m.crc32,
+               (unsigned long long)m.start_utc_ms);
+        return 0;
+    }
+    printf("usage: clip get <id> | clip rm <id|all> | clip meta <id> [redo]\n");
     return 1;
 }
 
@@ -330,6 +427,42 @@ static int cmd_poweroff(int argc, char **argv)
     return 0;
 }
 
+static int cmd_ble(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "bench") == 0) {
+        ble_set_bench(argc < 3 || strcmp(argv[2], "off") != 0);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "forget") == 0) {
+        esp_err_t err = ble_forget_bonds();
+        printf("bonds %s\n", err == ESP_OK ? "deleted" : esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "txpower") == 0) {
+        return ble_set_tx_power(atoi(argv[2])) == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "adv") == 0) {
+        ble_set_adv_mode(strcmp(argv[2], "off") == 0 ? BLE_ADV_OFF : strcmp(argv[2], "idle") == 0 ? BLE_ADV_IDLE : BLE_ADV_DELIVER);
+        return 0;
+    }
+    if (argc >= 2) {
+        printf("usage: ble [bench [on|off] | forget | adv off|idle|deliver | txpower <dBm>]\n");
+        return 1;
+    }
+    ble_status_t b;
+    ble_get_status(&b);
+    printf("connected %d, authenticated %d, bench %d, pairing %d, pending %u, busy %d\n", b.connected,
+           b.authenticated, b.bench, b.passkey != 0, b.pending, ble_busy());
+    if (b.transferring) {
+        printf("sending clip %u: %lu of %lu bytes\n", b.tx_clip, (unsigned long)b.tx_offset, (unsigned long)b.tx_size);
+    }
+    if (b.reply_state >= 0) {
+        printf("reply for clip %u, state %d: %s\n", b.reply_clip, b.reply_state, b.reply_text);
+    }
+    printf("reply window %s; RSSI %d dBm\n", b.reply_window ? "open" : "closed", ble_conn_rssi());
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     esp_restart();
@@ -355,7 +488,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
         {.command = "rec", .help = "Record a clip: rec <seconds>", .func = cmd_rec},
         {.command = "clips", .help = "List stored clips and storage use", .func = cmd_clips},
-        {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all>", .func = cmd_clip},
+        {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all> | clip meta <id> [redo]", .func = cmd_clip},
         {.command = "play", .help = "Play a clip on the speaker: play <id>", .func = cmd_play},
         {.command = "tone", .help = "Speaker test tone: tone [hz] [ms]", .func = cmd_tone},
         {.command = "level", .help = "Microphone peak level for 2 s", .func = cmd_level},
@@ -365,6 +498,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "pttlog", .help = "Wake-to-record latency records: pttlog [clear]", .func = cmd_pttlog},
         {.command = "wake", .help = "This boot's wake kind and timings", .func = cmd_wake},
         {.command = "poweroff", .help = "Switch the PMIC off", .func = cmd_poweroff},
+        {.command = "ble", .help = "BLE status | ble bench [on|off] | ble forget | ble adv off|idle|deliver", .func = cmd_ble},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
     };
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {

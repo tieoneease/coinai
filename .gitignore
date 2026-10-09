@@ -17,3 +17,4 @@ android/.idea/
 # a second copy lives in Documents/coinai-factory-backup.
 backup/*.bin
 backup/*.log
+__pycache__/

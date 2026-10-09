@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "ble.h"
 #include "imu.h"
 #include "pmic.h"
 
@@ -21,6 +22,7 @@ typedef struct {
     uint32_t rec_seconds;
     uint16_t last_clip;      // 0 = none yet
     uint32_t last_clip_ms;
+    ble_status_t ble;
 } ui_state_t;
 
 // Both must be called with the display lock held.

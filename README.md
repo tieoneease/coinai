@@ -28,15 +28,21 @@ $PY scripts/serlog.py COM9 10 --reset     # boot log; the port follows USB re-en
 $PY scripts/serlog.py COM9 5 --send pmic --send i2cscan --send imu --send stats
 $PY scripts/fbdump.py COM9 evidence/screen.png   # what LVGL rendered, CRC-checked
 $PY scripts/clipget.py COM9 3 clip3.ogg          # copy a clip off; checks transfer CRC and Ogg pages
+$PY scripts/cliplevels.py a.ogg b.ogg            # level distribution and 50 Hz-harmonic hum check
+cd scripts && $PY bletest.py list                # BLE bench client (needs `ble bench` on the coin)
 ```
+
+`bletest.py` speaks PROTOCOL.md over the PC's Bluetooth adapter: `status`, `list`, `get <clip> [--regrab-at N] [--reconnect-at N] [--ack]`, `config`, `reply`, `watch`. Windows cannot type the coin's passkey through bleak, so the coin must be in bench mode (until its next reboot). The PC's RZ616 adapter currently hears the coin at about -95 dBm and catches about 3% of its advertisements, which is too weak to hold a link (see HARDWARE.md, "BLE bring-up").
 
 Console commands (type `help` on the console for the full list):
 
 | Command | What it does |
 |---|---|
 | `pmic`, `pmic reg <hex> [<hex>]`, `pmic chg <mA>` | PMIC status, raw registers, charge current |
-| `i2cscan`, `imu`, `stats` | bus scan, one IMU sample, uptime/reset reason/heap |
+| `i2cscan`, `imu`, `stats` | bus scan, one IMU sample; `stats`: internal RAM at each boot step, every internal allocation of 2 KB or more with a backtrace (`addr2line -e build/coinai.elf`), heap now |
 | `rec <s>`, `clips`, `clip get <id>`, `clip rm <id\|all>` | record, list, dump, delete clips |
+| `clip meta <id> [redo]` | a clip's metadata; `redo` drops it first, so the cut-off-clip recovery recomputes it |
+| `ble`, `ble bench [on\|off]`, `ble forget`, `ble adv off\|idle\|deliver`, `ble txpower <dBm>` | BLE state and RSSI, bench mode (no pairing, until reboot), delete bonds, advertising mode, radio power |
 | `play <id>`, `tone [hz] [ms]`, `level`, `loopback [hz]` | speaker and microphone checks |
 | `sleep [s] [rec]` | standby; wakes on PWR, or after `s` seconds (`rec`: the wake records like a PWR hold) |
 | `ptttest [n]`, `pttlog [clear]`, `wake` | unattended standby→record latency trials and the latency records |

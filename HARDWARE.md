@@ -172,6 +172,7 @@ Meanings per XPowersLib; datasheet not checked.
 | `app_main` → first 20 ms audio frame in RAM | 95–115 ms |
 | `app_main` → clip file open | 98–120 ms (one 162 ms outlier; I2S DMA buffering covers it) |
 | **Wake → first audio frame** | **208–229 ms** |
+| Same, with BLE in the image (3 trials) | 243–255 ms: wake → `app_main` 123 ms (+10 ms; the image grew from 1.06 to 1.37 MB and is copied into PSRAM on every boot), `app_main` → first frame 119–132 ms (+5–17 ms, cause not isolated) |
 
 - The first ~40 ms of a cold-started capture are digital silence (ES7210 settling). A faint click at −59 dBFS follows, then a floor near −70 dBFS.
 - PWROK delay: 8 ms (AXP2101 register 0x25 = 0x18, bits 1:0 = 0).
@@ -182,5 +183,27 @@ Meanings per XPowersLib; datasheet not checked.
 
 **Internal RAM.** The heap starts at about 286 KB (265 + 21 KB).
 - LVGL with `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` put 105 KB of code in IRAM; it is now off.
-- The capture task stack (32 KB) stays internal because that task writes flash.
-- With the display in internal DMA buffers (2 × 22 KB), 116 KB is free after boot, with a low-water mark of 83 KB.
+- With the display in internal DMA buffers (2 × 22 KB), 116 KB is free after boot, with a low-water mark of 83 KB (before BLE).
+
+## BLE bring-up (2026-10-09)
+
+**Internal RAM with BLE.** NimBLE (host allocations in PSRAM) at first left only 31.7 KB free, with a low-water mark of 7.8 KB. The fix was to move stacks and buffers that need no DMA into PSRAM:
+- the capture task's 32 KB stack
+- the BLE worker and status task stacks
+- the Ogg page buffer, the pre-roll ring, and the clip lists
+
+This is safe while the capture task writes flash. With XIP from PSRAM, IDF keeps the cache on during flash writes and takes a mutex instead (`SPI_FLASH_CACHE_NO_DISABLE` in `spi_flash_os_func_app.c`). Opus encoding with the PSRAM stack: average 3932–4105 µs per 20 ms frame, maximum 5084 µs, against 3934/4796 µs before; the stack keeps 8.9 KB free.
+
+| Boot step (`stats`) | Internal free after it |
+|---|---|
+| audio up (130 ms) | 235 KB |
+| display + LVGL (1.6 s; mostly 2 × 22 KB draw buffers, 2 × 8 KB LVGL draw threads, 8 KB LVGL task) | 149 KB |
+| NimBLE controller (≈ 18 KB in blocks of 2 KB or more) and host task | 105 KB |
+| console (8 KB REPL stack) | 94 KB |
+
+- Steady state: 93 KB free.
+- The reported low-water mark is about 32 KB below free from the very first allocation. That is the reserved internal DMA pool (`esp_psram_extram_reserve_dma_pool`) being counted in the minimum, not a real dip. A recording adds about 6 KB of transient use.
+
+**Radio vs. audio.** I recorded twice with fast advertising (20 ms) at +20 dBm and twice with advertising off. In both conditions, the bins at 50 Hz and its harmonics are no louder than off-harmonic bins: −5.8 dB with advertising, +0.2 dB without (`scripts/cliplevels.py`, clips 17 and 18). The room was noisy (median −52 dBFS), so this rules out coupling above about −85 dB per bin, not below.
+
+**PC Bluetooth adapter.** The PC's MediaTek RZ616 hears the coin at −93 to −99 dBm. That is with the coin on a USB cable next to the PC, at +9 or +20 dBm. In 10 s the adapter caught 6 of the coin's ~195 advertising packets and saw only one other device nearby, and the PC's Wi-Fi is disconnected. The adapter's antennas are probably not attached. The one connection that succeeded hit an HCI timeout on LE Set Data Length and a host reset; later attempts never reached the coin. Bench BLE tests need a better adapter or antenna, or the phone.

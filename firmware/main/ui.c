@@ -14,6 +14,8 @@ static lv_obj_t *s_imu;
 static lv_obj_t *s_touch;
 static lv_obj_t *s_uptime;
 static lv_obj_t *s_rec;
+static lv_obj_t *s_ble;
+static lv_obj_t *s_reply;
 static lv_obj_t *s_dot;
 static uint32_t s_touches;
 
@@ -82,6 +84,11 @@ void ui_init(void)
     s_imu = add_label(col, &lv_font_montserrat_16, dim, "imu --");
     s_touch = add_label(col, &lv_font_montserrat_16, dim, "touch the screen");
     s_rec = add_label(col, &lv_font_montserrat_20, fg, "hold PWR to record");
+    s_ble = add_label(col, &lv_font_montserrat_20, dim, "BLE --");
+    s_reply = add_label(col, &lv_font_montserrat_16, fg, "");
+    lv_obj_set_width(s_reply, 330);
+    lv_label_set_long_mode(s_reply, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_add_flag(s_reply, LV_OBJ_FLAG_HIDDEN);
     s_uptime = add_label(col, &lv_font_montserrat_16, dim, "");
 
     s_dot = lv_obj_create(scr);
@@ -92,6 +99,47 @@ void ui_init(void)
     lv_obj_set_style_bg_color(s_dot, lv_color_hex(0x35C2FF), 0);
     lv_obj_set_style_bg_opa(s_dot, LV_OPA_COVER, 0);
     lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void update_ble(const ble_status_t *b)
+{
+    static bool big;
+    bool pairing = b->passkey != 0;
+    if (pairing != big) {
+        big = pairing;
+        lv_obj_set_style_text_font(s_ble, pairing ? &lv_font_montserrat_28 : &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_ble, pairing ? lv_color_hex(0x35C2FF) : lv_color_hex(0x8A8A8A), 0);
+    }
+    if (pairing) {
+        lv_label_set_text_fmt(s_ble, "pair: %03lu %03lu", (unsigned long)(b->passkey / 1000),
+                              (unsigned long)(b->passkey % 1000));
+    } else if (b->transferring) {
+        if (b->tx_size) {
+            lv_label_set_text_fmt(s_ble, "sending clip %u: %lu%%", b->tx_clip,
+                                  (unsigned long)((uint64_t)b->tx_offset * 100 / b->tx_size));
+        } else {
+            lv_label_set_text_fmt(s_ble, "sending clip %u: %lu KB", b->tx_clip, (unsigned long)(b->tx_offset / 1024));
+        }
+    } else if (b->connected) {
+        lv_label_set_text_fmt(s_ble, "phone %s%s, %u pending", b->authenticated ? "paired" : "connected",
+                              b->bench ? " (bench)" : "", b->pending);
+    } else {
+        lv_label_set_text_fmt(s_ble, "BLE waiting, %u pending%s", b->pending, b->bench ? " (bench)" : "");
+    }
+
+    static const char *const STATES[] = {"transcribing...", "thinking...", "", "failed: "};
+    static int shown_state = -2;
+    static uint16_t shown_clip;
+    if (b->reply_state != shown_state || b->reply_clip != shown_clip) {
+        shown_state = b->reply_state;
+        shown_clip = b->reply_clip;
+        if (b->reply_state < 0 || b->reply_state > 3) {
+            lv_obj_add_flag(s_reply, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text_fmt(s_reply, "%s%s", STATES[b->reply_state], b->reply_text);
+            lv_obj_remove_flag(s_reply, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 void ui_update(const ui_state_t *st)
@@ -133,4 +181,5 @@ void ui_update(const ui_state_t *st)
         }
         lv_obj_set_style_text_color(s_rec, lv_color_hex(0xE8E8E8), 0);
     }
+    update_ble(&st->ble);
 }

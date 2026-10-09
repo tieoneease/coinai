@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "audio.h"
+#include "ble.h"
 #include "display.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
@@ -189,6 +190,7 @@ bool power_test_series_next(void)
 
 static void peripherals_down(void)
 {
+    ble_shutdown();  // the phone sees the link end now instead of after the supervision timeout
     audio_shutdown();
     imu_sleep();
     display_set_brightness(0);

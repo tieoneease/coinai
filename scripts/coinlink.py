@@ -7,7 +7,8 @@ import zlib
 import serial
 
 # Firmware dumps use 57-byte chunks: 76 base64 characters per line, the last one shorter and padded.
-B64_LINE = re.compile(r"^[A-Za-z0-9+/]{4,76}={0,2}$")
+# One base64 line: 4-char groups; the last group may be padded ("XX==" encodes a single byte).
+B64_LINE = re.compile(r"^(?:[A-Za-z0-9+/]{4}){0,18}(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$")
 
 
 def open_port(name):

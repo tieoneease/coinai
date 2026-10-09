@@ -199,7 +199,7 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
 | 1 | done | **you:** screen, touch and button counters; IMU INT1 pin |
 | 2 | done: clips decode, loopback tone 65 dB above control | **you:** listen to a clip |
 | 3 | standby → first audio frame **208–229 ms** over 10 unattended trials (target 400 ms) | **you:** real PWR presses from Standby and Off; BOOT+PWR power-off; then disable the PMIC long-press (D5) |
-| 4 | next: firmware GATT service; app sync engine in progress (worker, `android-scaffold`) | |
+| 4 | firmware GATT server built: advertises (seen by the PC), RAM budget fixed (93 KB internal free), recording unaffected by the radio. App slice 2 merged (77 unit tests). **No link test yet:** the PC's adapter is too deaf to hold a connection | **you:** USB debugging on the phone (installs the app and runs the link tests), or attach the PC's Wi-Fi/BT antenna; pairing passkey entry on the phone |
 
 0. **Safety net and toolchains.**
    - ESP-IDF v5.5.5 via Espressif's EIM.
