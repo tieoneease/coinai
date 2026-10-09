@@ -1,6 +1,6 @@
 # coinai BLE protocol v1 (draft)
 
-This is the contract between `firmware/` (ESP32-S3, NimBLE peripheral) and `android/` (Kotlin, GATT central). Both sides implement it and share the test vectors in `protocol/vectors/`, which will be added with the first implementation. Status: proposed, 2026-10-09.
+This is the contract between `firmware/` (ESP32-S3, NimBLE peripheral) and `android/` (Kotlin, GATT central). Both sides implement it and must pass the test vectors in `protocol/vectors/v1.json`. `protocol/gen_vectors.py` is the reference encoder that writes them. Status: wire format fixed 2026-10-09.
 
 ## Advertising
 
@@ -33,7 +33,11 @@ The intervals follow Apple's Accessory Design Guidelines §58.5. They are harmle
 
 ### Service `coinai`
 
-UUIDs are generated at implementation.
+| Item | UUID |
+|---|---|
+| Service `coinai` | `c0a10000-f569-41ae-8676-7f5a60d835fc` |
+| `ctrl` characteristic | `c0a10001-f569-41ae-8676-7f5a60d835fc` |
+| `data` characteristic | `c0a10002-f569-41ae-8676-7f5a60d835fc` |
 
 **`ctrl`** (write with response + indicate). Messages are TLV: `type u8, len u16 LE, value`.
 
@@ -54,6 +58,29 @@ UUIDs are generated at implementation.
 **`data`** (notify):
 - Packet: `[clip id u16 LE][offset u32 LE][bytes…]`, up to 238 payload bytes per notification at MTU 247.
 - The device streams from the offset given in `GET`, including while the clip is still being recorded, and finishes with `CLIP_ENDED`.
+
+### Wire format v1
+
+All integers are little-endian. Strings are UTF-8 with no terminator, and a string field takes the rest of the value unless a length byte precedes it. Message types `0x01`–`0x3F` go app → device; `0x80`–`0xBF` go device → app.
+
+| Code | Message | Value layout |
+|---|---|---|
+| `0x01` | `HELLO` | `version u8` (1), `phone_utc_ms u64` |
+| `0x02` | `LIST` | empty |
+| `0x03` | `GET` | `clip u16`, `offset u32` |
+| `0x04` | `ACK` | `clip u16`, `crc32 u32` |
+| `0x05` | `WIFI_SET` | `ssid_len u8`, `ssid` (\≤ 32 bytes), `pass_len u8`, `password` (\≤ 64 bytes) |
+| `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16`, `0x02` brightness `u8`, `0x03` idle_timeout_s `u16`, `0x04` off_after_h `u16` |
+| `0x07` | `REPLY` | `clip u16`, `state u8` (0 transcribing, 1 thinking, 2 done, 3 failed), `text` (\≤ 200 bytes) |
+| `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording), `pending u16`, `fw_version` (\≤ 32 bytes) |
+| `0x82` | `CLIP_STARTED` | `clip u16`, `codec u8` (1 = Ogg Opus), `sample_rate u32`, `start_utc_ms u64` (0 = unknown) |
+| `0x83` | `CLIP_ENDED` | `clip u16`, `size u32`, `duration_ms u32`, `crc32 u32` |
+| `0x84` | `LIST_RESULT` | `flags u8` (bit 0 = more messages follow), then entries of `clip u16`, `size u32`, `flags u8` (bit 0 complete), up to 34 per message |
+| `0x85` | `ERROR` | `request_type u8`, `code u8` (1 unknown clip, 2 bad offset, 3 bad length, 4 busy, 5 invalid value), `clip u16` (`0xFFFF` if none) |
+
+- **CRC-32:** IEEE 802.3, the same as zlib's `crc32`, taken over the whole `.ogg` file.
+- **Clip ids:** `u16`, increasing, kept across reboots in NVS. They wrap after 65535.
+- **On connect:** the device answers `HELLO` with `STATUS`.
 
 ### Standard services
 

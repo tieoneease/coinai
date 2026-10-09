@@ -1,0 +1,194 @@
+{
+  "protocol_version": 1,
+  "service_uuid": "c0a10000-f569-41ae-8676-7f5a60d835fc",
+  "ctrl_uuid": "c0a10001-f569-41ae-8676-7f5a60d835fc",
+  "data_uuid": "c0a10002-f569-41ae-8676-7f5a60d835fc",
+  "ctrl": [
+    {
+      "direction": "app_to_device",
+      "type": "HELLO",
+      "type_code": 1,
+      "fields": {
+        "version": 1,
+        "phone_utc_ms": 1760000000000
+      },
+      "hex": "0109000100c02cc899010000"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "LIST",
+      "type_code": 2,
+      "fields": {},
+      "hex": "020000"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "GET",
+      "type_code": 3,
+      "fields": {
+        "clip": 7,
+        "offset": 4096
+      },
+      "hex": "030600070000100000"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "ACK",
+      "type_code": 4,
+      "fields": {
+        "clip": 7,
+        "crc32": 3735928559
+      },
+      "hex": "0406000700efbeadde"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "WIFI_SET",
+      "type_code": 5,
+      "fields": {
+        "ssid": "home",
+        "password": "secret pass"
+      },
+      "hex": "05110004686f6d650b7365637265742070617373"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "CFG_SET",
+      "type_code": 6,
+      "fields": {
+        "key": "reply_wait_s",
+        "value": 45
+      },
+      "hex": "060300012d00"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "CFG_SET",
+      "type_code": 6,
+      "fields": {
+        "key": "brightness",
+        "value": 200
+      },
+      "hex": "06020002c8"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "REPLY",
+      "type_code": 7,
+      "fields": {
+        "clip": 7,
+        "state": "thinking",
+        "text": ""
+      },
+      "hex": "070300070001"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "REPLY",
+      "type_code": 7,
+      "fields": {
+        "clip": 7,
+        "state": "done",
+        "text": "Got it — added to your list."
+      },
+      "hex": "072100070002476f7420697420e2809420616464656420746f20796f7572206c6973742e"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "STATUS",
+      "type_code": 129,
+      "fields": {
+        "battery_pct": 87,
+        "charging": 1,
+        "usb_power": 1,
+        "recording": 0,
+        "pending": 2,
+        "fw_version": "0.1.0"
+      },
+      "hex": "81090057030200302e312e30"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "STATUS",
+      "type_code": 129,
+      "fields": {
+        "battery_pct": 255,
+        "charging": 0,
+        "usb_power": 0,
+        "recording": 1,
+        "pending": 0,
+        "fw_version": "0.1.0"
+      },
+      "hex": "810900ff040000302e312e30"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "CLIP_STARTED",
+      "type_code": 130,
+      "fields": {
+        "clip": 7,
+        "codec": 1,
+        "sample_rate": 16000,
+        "start_utc_ms": 1760000000000
+      },
+      "hex": "820f00070001803e000000c02cc899010000"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "CLIP_ENDED",
+      "type_code": 131,
+      "fields": {
+        "clip": 7,
+        "size": 18234,
+        "duration_ms": 6020,
+        "crc32": 305441741
+      },
+      "hex": "830e0007003a47000084170000cdab3412"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "LIST_RESULT",
+      "type_code": 132,
+      "fields": {
+        "more": false,
+        "entries": [
+          {
+            "clip": 6,
+            "size": 9000,
+            "complete": true
+          },
+          {
+            "clip": 7,
+            "size": 18234,
+            "complete": true
+          },
+          {
+            "clip": 8,
+            "size": 512,
+            "complete": false
+          }
+        ]
+      },
+      "hex": "841600000600282300000107003a4700000108000002000000"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "ERROR",
+      "type_code": 133,
+      "fields": {
+        "request": "GET",
+        "code": 1,
+        "clip": 9
+      },
+      "hex": "85040003010900"
+    }
+  ],
+  "data": [
+    {
+      "clip": 7,
+      "offset": 238,
+      "payload_hex": "00010203040506070809",
+      "hex": "0700ee00000000010203040506070809"
+    }
+  ]
+}
