@@ -145,6 +145,22 @@ The reference implementation is `~/.sambot/telegram/src/sambot-client.ts` on the
 - Behaviour after Settings → Force stop. Expected: nothing until the app is reopened.
 - ColorOS battery management. ColorOS has its own per-app background and auto-launch switches, separate from Android's battery-optimization exemption, and their names vary by ColorOS version. The app points to them, and phase 5 tests with them on and off.
 
+**Phase 5 phone settings.** The menu paths below come from OPPO's support pages for ColorOS 12 and later and from third-party guides, and have not been checked on ColorOS 16. Each phase 5 run records which of these settings are on.
+
+| Setting | Path (ColorOS 12+) |
+|---|---|
+| Allow background activity | Settings → Apps → App management → coinai → Battery usage |
+| Auto launch (start after reboot) | Settings → Apps → App management → coinai → Battery usage, or Settings → App management → Auto-launch apps |
+| Android battery optimization | Settings → Battery → More battery settings → Optimize battery use → coinai → Don't optimize. The app also asks through `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` |
+| Lock in recents | Recent apps → the card's menu → Lock |
+| Notifications | Allowed, including the "clip delivered" and reply channels |
+
+The matrix runs each condition with the settings at their defaults and with all of them on:
+- screen off for 10 minutes or more
+- after a phone reboot
+- after swiping the app away from recents
+- after Force stop; delivery is expected to stop until the app is opened
+
 **Fallback** if presence detection is slow or unreliable: a persistent `connectedDevice` service holding an auto-connect link. The cost is a permanent notification.
 
 ## Firmware architecture
