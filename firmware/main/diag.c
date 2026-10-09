@@ -1,0 +1,180 @@
+#include "diag.h"
+
+#include <inttypes.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "bsp/esp-bsp.h"
+#include "esp_check.h"
+#include "esp_console.h"
+#include "esp_heap_caps.h"
+#include "esp_rom_crc.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "imu.h"
+#include "lvgl.h"
+#include "pmic.h"
+
+static const char *TAG = "diag";
+static i2c_master_bus_handle_t s_bus;
+
+static int cmd_i2cscan(int argc, char **argv)
+{
+    int found = 0;
+    printf("I2C:");
+    for (uint16_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_master_probe(s_bus, addr, 50) == ESP_OK) {
+            printf(" 0x%02x", addr);
+            found++;
+        }
+    }
+    printf("\n%d devices\n", found);
+    return 0;
+}
+
+static int cmd_pmic(int argc, char **argv)
+{
+    if (argc == 1) {
+        pmic_status_t s;
+        if (pmic_read_status(&s) != ESP_OK) {
+            printf("PMIC read failed\n");
+            return 1;
+        }
+        printf("battery %s, %d%%, %u mV; charger %s (%s); VBUS %s %u mV; VSYS %u mV; die %.1f C\n",
+               s.battery_present ? "present" : "absent", s.battery_pct, s.vbat_mv,
+               pmic_charger_state_name(s.charger_state), s.charging ? "charging" : s.discharging ? "discharging" : "standby",
+               s.vbus_good ? "good" : "absent", s.vbus_mv, s.vsys_mv, (double)s.die_temp_c);
+        return pmic_log_config() == ESP_OK ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "reg") == 0) {
+        uint8_t reg = (uint8_t)strtoul(argv[2], NULL, 16);
+        uint8_t val;
+        if (argc == 4) {
+            val = (uint8_t)strtoul(argv[3], NULL, 16);
+            if (pmic_write_reg(reg, val) != ESP_OK) {
+                printf("write failed\n");
+                return 1;
+            }
+        }
+        if (pmic_read_reg(reg, &val) != ESP_OK) {
+            printf("read failed\n");
+            return 1;
+        }
+        printf("reg 0x%02x = 0x%02x\n", reg, val);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "chg") == 0) {
+        esp_err_t err = pmic_set_charge_current_ma(atoi(argv[2]));
+        printf("%s\n", err == ESP_OK ? "ok" : esp_err_to_name(err));
+        return err == ESP_OK ? 0 : 1;
+    }
+    printf("usage: pmic | pmic reg <hex> [<hex value>] | pmic chg <mA>\n");
+    return 1;
+}
+
+static int cmd_imu(int argc, char **argv)
+{
+    imu_sample_t s;
+    if (imu_read(&s) != ESP_OK) {
+        printf("IMU read failed\n");
+        return 1;
+    }
+    printf("accel %.3f %.3f %.3f g (|a| %.3f); gyro %.1f %.1f %.1f dps; %.1f C\n", (double)s.ax, (double)s.ay,
+           (double)s.az, sqrt((double)(s.ax * s.ax + s.ay * s.ay + s.az * s.az)), (double)s.gx, (double)s.gy,
+           (double)s.gz, (double)s.temp_c);
+    return 0;
+}
+
+static int cmd_stats(int argc, char **argv)
+{
+    printf("uptime %.1f s; reset reason %d\n", esp_timer_get_time() / 1e6, (int)esp_reset_reason());
+    printf("internal free %u (min %u); PSRAM free %u (min %u)\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+    return 0;
+}
+
+static void base64_line(const uint8_t *in, size_t len, char *out)
+{
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        if (i + 1 < len) v |= (uint32_t)in[i + 1] << 8;
+        if (i + 2 < len) v |= in[i + 2];
+        out[o++] = tbl[(v >> 18) & 63];
+        out[o++] = tbl[(v >> 12) & 63];
+        out[o++] = i + 1 < len ? tbl[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < len ? tbl[v & 63] : '=';
+    }
+    out[o] = '\0';
+}
+
+// Renders the active screen into an RGB565 buffer and prints it as base64 between markers.
+// scripts/fbdump.py turns the output into a PNG.
+static int cmd_fbdump(int argc, char **argv)
+{
+    if (bsp_display_lock(2000) != ESP_OK) {
+        printf("display busy\n");
+        return 1;
+    }
+    int64_t t0 = esp_timer_get_time();
+    lv_draw_buf_t *snap = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
+    int64_t t1 = esp_timer_get_time();
+    bsp_display_unlock();
+    if (!snap) {
+        printf("snapshot failed\n");
+        return 1;
+    }
+    uint32_t w = snap->header.w, h = snap->header.h, stride = snap->header.stride;
+    size_t len = (size_t)stride * h;
+    // Other tasks' log lines would land inside the base64 stream.
+    esp_log_level_set("*", ESP_LOG_NONE);
+    printf("FBDUMP-BEGIN %" PRIu32 " %" PRIu32 " %" PRIu32 " RGB565 render_us=%lld\n", w, h, stride, (long long)(t1 - t0));
+    char line[80];
+    for (size_t off = 0; off < len; off += 57) {
+        size_t n = len - off < 57 ? len - off : 57;
+        base64_line(snap->data + off, n, line);
+        puts(line);
+    }
+    printf("FBDUMP-END %08" PRIx32 "\n", esp_rom_crc32_le(0, snap->data, len));
+    fflush(stdout);
+    esp_log_level_set("*", CONFIG_LOG_DEFAULT_LEVEL);
+    lv_draw_buf_destroy(snap);
+    return 0;
+}
+
+static int cmd_reboot(int argc, char **argv)
+{
+    esp_restart();
+    return 0;
+}
+
+esp_err_t diag_start(i2c_master_bus_handle_t bus)
+{
+    s_bus = bus;
+    esp_console_repl_t *repl = NULL;
+    esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    repl_cfg.prompt = "coin> ";
+    repl_cfg.max_cmdline_length = 256;
+    repl_cfg.task_stack_size = 8192;
+    esp_console_dev_usb_serial_jtag_config_t hw = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_console_new_repl_usb_serial_jtag(&hw, &repl_cfg, &repl), TAG, "repl");
+
+    const esp_console_cmd_t cmds[] = {
+        {.command = "i2cscan", .help = "List responding I2C addresses", .func = cmd_i2cscan},
+        {.command = "pmic", .help = "PMIC status and registers: pmic | pmic reg <hex> [<hex>] | pmic chg <mA>", .func = cmd_pmic},
+        {.command = "imu", .help = "One IMU sample", .func = cmd_imu},
+        {.command = "stats", .help = "Uptime, reset reason, heap", .func = cmd_stats},
+        {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
+        {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
+    };
+    for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
+        ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]), TAG, "register %s", cmds[i].command);
+    }
+    ESP_RETURN_ON_ERROR(esp_console_register_help_command(), TAG, "help");
+    return esp_console_start_repl(repl);
+}

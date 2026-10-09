@@ -9,5 +9,7 @@ dir="$(cygpath -w "$(cd "$1" && pwd)")"
 shift
 args=""
 for a in "$@"; do args+=" '${a//\'/\'\'}'"; done
+# idf.py silently skips main() and exits 0 whenever MSYSTEM is set (Git Bash sets it, and
+# `env -u` does not keep it out of the PowerShell child), so drop it inside PowerShell.
 exec powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
-  "& { . '$profile' *> \$null; Set-Location -LiteralPath '$dir'; idf.py$args; exit \$LASTEXITCODE }"
+  "& { Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue; . '$profile' *> \$null; Set-Location -LiteralPath '$dir'; idf.py$args; exit \$LASTEXITCODE }"

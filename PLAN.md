@@ -1,6 +1,9 @@
 # coinai plan
 
-**Status:** proposed, 2026-10-09. Revision 3: phone (OPPO Find N6, Android 16 / ColorOS 16) and processing (SamBot) settled; phase 0 approved.
+**Status:** 2026-10-09. Revision 3: phone (OPPO Find N6, Android 16 / ColorOS 16) and processing (SamBot) are settled.
+- Phase 0 is done except `adb devices`, which needs your phone.
+- Phase 1 is done except the steps that need you (screen, touch, buttons) and IMU INT1.
+- Evidence is in HARDWARE.md ("Factory state") and `evidence/`.
 
 **Two parts:**
 - Firmware for the Waveshare ESP32-S3-Touch-AMOLED-1.75C. The battery is installed. MAC A0:F2:62:E3:0A:C0, COM9 over native USB.
@@ -66,7 +69,7 @@ Standby falls through to Off after a configurable number of unused hours, or on 
   - Capture starts on press. A release within 200 ms counts as a tap: the audio is discarded and the screen toggles.
   - From Standby or Off, if PWR is still held once firmware is ready, recording runs until release.
 - **BOOT** is an in-app secondary button (cancel, back). It is not a wake source: PWR already covers waking, and this avoids strapping-pin edge cases.
-  - Holding BOOT while powering on from Off is expected to enter ROM download mode, which would be a recovery path (**verify**).
+  - Holding BOOT while powering on from Off is expected to enter ROM download mode, which would be a recovery path (**verify**). esptool's USB reset already reaches download mode without it.
 - **Power off:** from the UI menu, or by holding BOOT and then PWR for 3 s. The PMIC's hardware long-press shutdown is disabled so that long dictation can't cut power. Task, interrupt and RTC watchdogs cover hangs.
 - **Touch** is for UI navigation only.
 
@@ -257,7 +260,7 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - **D4 Clips are Ogg Opus, stored and forwarded, resumable, deleted on a CRC-matched ACK.**
   - *Rejected:* raw PCM, which is about 10× larger.
   - *Rejected:* live-only streaming, which loses audio whenever the phone is away.
-- **D5 The PMIC's long-press shutdown is disabled;** power off from the UI or with BOOT+PWR.
+- **D5 The PMIC's long-press shutdown is disabled;** power off from the UI or with BOOT+PWR. It stays enabled (6 s, factory setting) until phase 3 proves the firmware's own power-off path and watchdogs; until then it is the recovery path.
   - *Rejected:* a 10 s hardware off, which would cut long dictations.
 - **D6 Two OTA slots with rollback.**
   - *Rejected:* a single factory app. Changing the layout later needs USB and wipes stored clips.

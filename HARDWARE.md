@@ -12,7 +12,7 @@ Do not reuse pinouts for the sibling ESP32-S3-Touch-AMOLED-1.75 (non-C). It has 
 
 ## SoC, memory, clocks, USB
 
-- ESP32-S3R8: 8 MB octal PSRAM in package. External 32 MB flash in QIO mode (**verify** with `esptool flash_id`).
+- ESP32-S3R8: 8 MB octal PSRAM in package (AP Memory, 3.3 V), chip revision v0.2. External 32 MB GigaDevice flash in QIO mode: manufacturer 0xC8, device 0x4019. Verified 2026-10-09 with `esptool flash-id`.
 - 40 MHz crystal X1. **No 32.768 kHz crystal**: the layout shows only X1. As a result, a BLE connection held through light sleep must keep the main crystal running (see PLAN.md decision D3).
 - Native USB-Serial/JTAG on GPIO19/20, which enumerates as VID 303A / PID 1001 (COM9 on the dev PC).
 - No reset button. AXP2101 PWROK drives CHIP_PU. Test pads: TP11 "RST" (CHIP_PU) and TP1 GND.
@@ -24,7 +24,7 @@ Do not reuse pinouts for the sibling ESP32-S3-Touch-AMOLED-1.75 (non-C). It has 
 | 0 | BOOT key (Key1), 10 kΩ pull-up, 100 nF | Strapping pin. Held low at chip reset or power-on → ROM download mode. RTC GPIO. |
 | 1 | LCD_RESET | RTC GPIO (can be held through deep sleep). |
 | 2 | TP_RESET | RTC GPIO. |
-| 3 | SYS_OUT = PWR key state, **high while pressed** | Strapping pin (JTAG source; matters only if eFuse `STRAP_JTAG_SEL` is burned, **verify** with `espefuse summary`). RTC GPIO, so it can wake deep sleep. |
+| 3 | SYS_OUT = PWR key state, **high while pressed** | Strapping pin (JTAG source; matters only if eFuse `STRAP_JTAG_SEL` is burned, and it is not: see `backup/efuse-summary.txt`). Reads 0 when released (verified). RTC GPIO, so it can wake deep sleep. |
 | 4–7 | QSPI SIO0–3 (CO5300) | |
 | 8 | I2S DSDIN (to ES8311) | |
 | 9 | I2S SCLK | Shared by ES8311 and ES7210. |
@@ -55,7 +55,7 @@ Crops: `hardware/schematic-gpio-table.png`, `hardware/schematic-keys-imu.png`, `
 | 0x5A | CST9217 touch |
 | 0x6B | QMI8658 IMU (address strap shown on the schematic) |
 
-The C variant has no TCA9554 and no RTC chip. **verify** all of the above with an I2C scan.
+The C variant has no TCA9554 and no RTC chip. Verified 2026-10-09: the I2C scan finds exactly 0x18, 0x34, 0x40, 0x5A and 0x6B.
 
 ## Buttons
 
@@ -115,3 +115,40 @@ Meanings per XPowersLib; datasheet not checked.
 - **Output path:** ES8311 → NS4150B amplifier (PA_CTRL GPIO46) → speaker pads.
 - **I2S pins:** MCLK 16, SCLK 9, LRCK 45, DOUT 8, DIN 10.
 - **BSP audio:** the BSP's default I2S config is duplex mono at 22.05 kHz. Waveshare's spectrum example captures 16 kHz stereo (both mics).
+
+## Factory state (read 2026-10-09)
+
+**eFuses** (`backup/efuse-summary.txt`):
+- Flash encryption off (`SPI_BOOT_CRYPT_CNT` = 0).
+- Secure boot off.
+- `STRAP_JTAG_SEL` not burned.
+- Download mode and USB-Serial/JTAG enabled.
+- No keys programmed.
+- `VDD_SPI_FORCE` set: flash and PSRAM run at 3.3 V.
+
+**Flash:**
+- A full 32 MB image is in `backup/` (git-ignored) and `Documents/coinai-factory-backup/`. SHA-256 `af222385…288b1`.
+- Restore with `esptool --port COM9 write-flash 0 factory-full-32MB.bin`.
+- Factory partition table:
+  - `nvsfactory` 0x9000, 200 KB
+  - `nvs` 0x3B000, 840 KB
+  - `otadata`
+  - `phy_init`
+  - `factory` app 0x110000, 9 MB
+  - `ota_0` and `ota_1`, 3.94 MB each
+  - `assets` (SPIFFS) 0x11F0000, 9 MB
+  - `storage` (SPIFFS) 0x1AF0000, 5 MB
+
+**AXP2101 registers as the factory firmware left them:**
+- 0x62 was already overwritten with the 100 mA cap before it could be logged; Waveshare's example code programs 400 mA.
+- `0x27 = 0x14`: PWR ON-time 128 ms, OFF-time 6 s, IRQ-time 1.5 s.
+- `0x22 = 0x06`: long-press shutdown enabled (action: power off). Phase 1 keeps it as a recovery path.
+- DCDC1 3.3 V and ALDO1 3.3 V, both on.
+- Charge target 4.2 V, precharge 125 mA, TS control `0x50 = 0x12`.
+- `0x80 = 0x0F` and `0x90 = 0xFF`: DCDC2–4 and every LDO are also on, although the schematic uses only DCDC1 and ALDO1. Switching the unused rails off is a phase 9 standby-current item; confirm each rail is unloaded first.
+- Power-on source `0x04` (VBUS insert). Power-off source `0x01`.
+
+**Bring-up readings:**
+- Battery 4127 mV at 100 %, charger "done" on USB (VBUS 4988 mV, VSYS 4339 mV).
+- IMU at rest |a| = 1.04 g; gyro zero-rate offset is about ±9 dps uncalibrated.
+- Display plus touch bring-up includes a 1.2 s stall with an `i2c.master` pull-up warning (seen with Waveshare's demo too). It matters for the phase 3 boot path.
