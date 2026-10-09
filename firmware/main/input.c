@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -48,12 +49,15 @@ static void input_task(void *arg)
     int64_t since[2] = {esp_timer_get_time(), esp_timer_get_time()};
     uint32_t pin = PIN_PWR;
     xQueueSend(s_queue, &pin, 0);  // reconcile the assumed state with the pins once at start
+    // The power-off gesture depends on this task, so the task watchdog covers it. It wakes at least
+    // once a second, which also re-reads the pins in case an edge was missed.
+    esp_task_wdt_add(NULL);
     for (;;) {
-        if (xQueueReceive(s_queue, &pin, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
-        while (xQueueReceive(s_queue, &pin, 0) == pdTRUE) {
+        esp_task_wdt_reset();
+        if (xQueueReceive(s_queue, &pin, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+            while (xQueueReceive(s_queue, &pin, 0) == pdTRUE) {
+            }
         }
         for (int i = 0; i < 2; i++) {
             bool now = is_pressed(pins[i]);

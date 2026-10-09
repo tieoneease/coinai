@@ -11,6 +11,7 @@
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_opus_dec.h"
 #include "esp_opus_enc.h"
 #include "esp_random.h"
@@ -27,6 +28,7 @@ static const char *TAG = "audio";
 #define FRAME_SAMPLES    320   // 20 ms
 #define FRAME_GRANULE    960   // 20 ms at 48 kHz
 #define PREROLL_FRAMES   10    // 200 ms kept from before the press
+#define READ_FAIL_MS     2000  // microphone read errors tolerated before the watchdog may fire
 #define PAGE_FRAMES      50    // one Ogg page (and flash sync) per second
 #define OPUS_PRE_SKIP    312   // encoder lookahead at 16 kHz (104 samples) in 48 kHz units
 #define OPUS_BITRATE     24000
@@ -238,11 +240,25 @@ static void capture_task(void *arg)
     int16_t *stereo = malloc(FRAME_SAMPLES * 2 * sizeof(int16_t));
     int16_t mono[FRAME_SAMPLES];
     assert(stereo);
+    // Watchdog: a capture that stops delivering frames for 5 s reboots the coin. Read errors are
+    // retried for READ_FAIL_MS, then the watchdog is left to fire.
+    esp_task_wdt_add(NULL);
+    int64_t failing_since = 0;
     for (;;) {
         if (esp_codec_dev_read(s_mic, stereo, FRAME_SAMPLES * 2 * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+            int64_t now = esp_timer_get_time();
+            if (!failing_since) {
+                failing_since = now;
+                ESP_LOGE(TAG, "microphone read failed");
+            }
+            if (now - failing_since < READ_FAIL_MS * 1000LL) {
+                esp_task_wdt_reset();
+            }
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
+        failing_since = 0;
+        esp_task_wdt_reset();
         if (!s_first_frame_ticks) {
             s_first_frame_ticks = power_rtc_ticks();
         }
@@ -268,6 +284,7 @@ static void capture_task(void *arg)
             if (s_recording) {
                 finish_clip(false);
             }
+            esp_task_wdt_delete(NULL);
             break;
         }
         if (s_start_req && !s_recording) {

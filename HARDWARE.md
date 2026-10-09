@@ -207,3 +207,13 @@ This is safe while the capture task writes flash. With XIP from PSRAM, IDF keeps
 **Radio vs. audio.** I recorded twice with fast advertising (20 ms) at +20 dBm and twice with advertising off. In both conditions, the bins at 50 Hz and its harmonics are no louder than off-harmonic bins: −5.8 dB with advertising, +0.2 dB without (`scripts/cliplevels.py`, clips 17 and 18). The room was noisy (median −52 dBFS), so this rules out coupling above about −85 dB per bin, not below.
 
 **PC Bluetooth adapter.** The PC's MediaTek RZ616 hears the coin at −93 to −99 dBm. That is with the coin on a USB cable next to the PC, at +9 or +20 dBm. In 10 s the adapter caught 6 of the coin's ~195 advertising packets and saw only one other device nearby, and the PC's Wi-Fi is disconnected. The adapter's antennas are probably not attached. The one connection that succeeded hit an HCI timeout on LE Set Data Length and a host reset; later attempts never reached the coin. Bench BLE tests need a better adapter or antenna, or the phone.
+
+**Watchdogs (D5 precondition).** These tasks are under the 5 s task watchdog, which panics and reboots:
+- the control loop (standby and power-off decisions)
+- the input task (PWR and BOOT, including the power-off gesture); it now wakes every second and re-reads the pins
+- the capture task, which lets microphone read errors run for 2 s and then lets the watchdog fire
+- the status task
+
+`wdtest` stalls a subscribed task. On the device the stall rebooted the coin with reset reason 6 (task watchdog). There were no false trips across 82 s that included a recording and the full protocol selftest.
+
+**Low battery.** Off USB power, 15 readings in a row (3 s) below 3450 mV power the coin off; a recording is finalised first. The threshold is provisional until phase 9 measures the cell. This path has not been exercised.

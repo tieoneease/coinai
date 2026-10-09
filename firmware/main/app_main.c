@@ -12,6 +12,7 @@
 #include "diag.h"
 #include "display.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -42,6 +43,10 @@ static const char *TAG = "coinai";
 // After a PWR tap, how long to wait for a phone that has not connected yet.
 #define TAP_DELIVERY_S      10
 #define POWEROFF_COMBO_MS   3000
+// Provisional until phase 9 measures the cell: about 5% left on a Li-ion cell, and the 3.3 V
+// buck has no headroom below this. 15 readings = 3 s, so radio bursts do not trigger it.
+#define LOW_BATTERY_MV      3450
+#define LOW_BATTERY_SAMPLES 15
 // A wake by PWR counts as a tap (screen on, no clip) when the whole press is shorter than this.
 #define WAKE_TAP_MS         300
 // Deep-sleep wake to power_boot(), measured with ptttest (112-115 ms). PWR wakes have no
@@ -163,8 +168,21 @@ static void status_task(void *arg)
 {
     ui_state_t st = {0};
     int64_t last_log = 0;
+    int low_samples = 0;
+    esp_task_wdt_add(NULL);
     for (;;) {
+        esp_task_wdt_reset();
         st.pmic_ok = pmic_read_status(&st.pmic) == ESP_OK;
+        // Low battery: below LOW_BATTERY_MV for LOW_BATTERY_SAMPLES readings in a row, off USB
+        // power, the coin powers off (any recording is finalised first).
+        if (st.pmic_ok && st.pmic.battery_present && !st.pmic.vbus_good && st.pmic.vbat_mv < LOW_BATTERY_MV) {
+            if (++low_samples == LOW_BATTERY_SAMPLES) {
+                ESP_LOGW(TAG, "battery at %u mV: powering off", st.pmic.vbat_mv);
+                post(CTL_POWEROFF, NULL);
+            }
+        } else {
+            low_samples = 0;
+        }
         if (st.pmic_ok) {
             s_vbus = st.pmic.vbus_good;
         }
@@ -233,7 +251,9 @@ static void control_loop(lv_display_t *disp)
     int64_t deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
     int last_reply_state = -1;
     uint16_t last_reply_clip = 0;
+    esp_task_wdt_add(NULL);  // standby and power-off decisions must not hang (D5)
     for (;;) {
+        esp_task_wdt_reset();
         ctl_msg_t m;
         if (xQueueReceive(s_ctl, &m, pdMS_TO_TICKS(250)) == pdTRUE) {
             switch (m.type) {

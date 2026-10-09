@@ -10,6 +10,7 @@
 #include "driver/rtc_io.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_private/esp_clk.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -199,6 +200,7 @@ static void peripherals_down(void)
 void power_enter_standby(uint32_t timer_s, bool test_record)
 {
     ESP_LOGI(TAG, "standby: timer %" PRIu32 " s%s", timer_s, test_record ? ", records on wake" : "");
+    esp_task_wdt_delete(NULL);  // the wait for PWR release below may be long; not subscribed is fine
     peripherals_down();
 
     // Hold the panel and touch controllers in reset: the panel stops scanning and touch stops
@@ -231,6 +233,7 @@ void power_enter_standby(uint32_t timer_s, bool test_record)
 void power_off(void)
 {
     ESP_LOGW(TAG, "power off");
+    esp_task_wdt_delete(NULL);
     peripherals_down();
     vTaskDelay(pdMS_TO_TICKS(50));  // let the log drain
     pmic_power_off();

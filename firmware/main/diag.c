@@ -18,6 +18,7 @@
 #include "esp_heap_caps.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -489,6 +490,20 @@ static int cmd_ble(int argc, char **argv)
     return 0;
 }
 
+// Proves the task watchdog: this task joins it, then stops resetting it. Expect a reboot ~5 s later
+// with reset reason 6 (task watchdog).
+static int cmd_wdtest(int argc, char **argv)
+{
+    printf("stalling the console task under the task watchdog; the coin should reboot\n");
+    fflush(stdout);
+    esp_task_wdt_add(NULL);
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(15000));
+    esp_task_wdt_delete(NULL);
+    printf("still running: the watchdog did not fire\n");
+    return 1;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     esp_restart();
@@ -525,6 +540,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "wake", .help = "This boot's wake kind and timings", .func = cmd_wake},
         {.command = "poweroff", .help = "Switch the PMIC off", .func = cmd_poweroff},
         {.command = "ble", .help = "BLE status | ble bench [on|off] | ble forget | ble adv off|idle|deliver", .func = cmd_ble},
+        {.command = "wdtest", .help = "Stall the console under the task watchdog (expect a reboot)", .func = cmd_wdtest},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
     };
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
