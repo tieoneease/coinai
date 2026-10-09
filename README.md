@@ -27,7 +27,21 @@ PY=/c/Users/Tanker/tools/esptool-venv/Scripts/python.exe
 $PY scripts/serlog.py COM9 10 --reset     # boot log; the port follows USB re-enumeration
 $PY scripts/serlog.py COM9 5 --send pmic --send i2cscan --send imu --send stats
 $PY scripts/fbdump.py COM9 evidence/screen.png   # what LVGL rendered, CRC-checked
+$PY scripts/clipget.py COM9 3 clip3.ogg          # copy a clip off; checks transfer CRC and Ogg pages
 ```
+
+Console commands (type `help` on the console for the full list):
+
+| Command | What it does |
+|---|---|
+| `pmic`, `pmic reg <hex> [<hex>]`, `pmic chg <mA>` | PMIC status, raw registers, charge current |
+| `i2cscan`, `imu`, `stats` | bus scan, one IMU sample, uptime/reset reason/heap |
+| `rec <s>`, `clips`, `clip get <id>`, `clip rm <id\|all>` | record, list, dump, delete clips |
+| `play <id>`, `tone [hz] [ms]`, `level`, `loopback [hz]` | speaker and microphone checks |
+| `sleep [s] [rec]` | standby; wakes on PWR, or after `s` seconds (`rec`: the wake records like a PWR hold) |
+| `ptttest [n]`, `pttlog [clear]`, `wake` | unattended standby→record latency trials and the latency records |
+| `poweroff` | PMIC off; PWR turns the board back on |
+| `fbdump`, `reboot` | screen dump, restart |
 
 - `scripts/idf` wraps EIM's PowerShell activation script. It removes `MSYSTEM` first, because `idf.py` silently does nothing (and exits 0) when it sees Git Bash.
 - COM9 is the coin. COM8 is an unrelated USB serial device (VID 1D50, PID 615E); never flash it.

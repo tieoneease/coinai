@@ -166,10 +166,10 @@ The reference implementation is `~/.sambot/telegram/src/sambot-client.ts` on the
 Cores: the radio and audio capture/encode run on core 0; LVGL rendering runs on core 1.
 
 **Display path, for the highest-performance UI.** The BSP default (PSRAM buffers, no tearing sync, 40 MHz) is replaced with:
-- DMA buffers in internal RAM.
+- DMA buffers in internal RAM. *Done in phase 3 (D16):* `display.c` sets up the panel and LVGL itself, with two 24-line draw buffers in internal DMA RAM.
 - TE-synced flushing on GPIO13.
 - A trial of 80 MHz QSPI.
-- LVGL rendering on its own core.
+- LVGL rendering on its own core. *Done:* LVGL runs on core 1.
 - FPS counters.
 
 A full 466×466 frame is 434 KB, so the bus caps full-screen redraws at about 46 fps (40 MHz) or about 92 fps (80 MHz).
@@ -190,6 +190,16 @@ storage,  data, littlefs, 0xC30000, 0x13D0000
 ## Phases
 
 Each phase ends with evidence on the device or your phone. **You** marks the steps that need you there.
+
+**Status (2026-10-09):**
+
+| Phase | State | Still open |
+|---|---|---|
+| 0 | done | **you:** USB debugging on, then `adb devices` |
+| 1 | done | **you:** screen, touch and button counters; IMU INT1 pin |
+| 2 | done: clips decode, loopback tone 65 dB above control | **you:** listen to a clip |
+| 3 | standby → first audio frame **208–229 ms** over 10 unattended trials (target 400 ms) | **you:** real PWR presses from Standby and Off; BOOT+PWR power-off; then disable the PMIC long-press (D5) |
+| 4 | next: firmware GATT service; app sync engine in progress (worker, `android-scaffold`) | |
 
 0. **Safety net and toolchains.**
    - ESP-IDF v5.5.5 via Espressif's EIM.
@@ -287,11 +297,18 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
   - *Rejected:* an SSH tunnel inside the app, as the palette uses. It would be fragile on mobile networks and would put an SSH key on the phone.
   - *Rejected:* making the proxy public. That would expose SamBot's API to the internet.
 - **D15 minSdk 36.** Only Android 16's presence API is implemented, because it is the only one we can test. Lower minSdk if another phone appears.
+- **D16 The firmware sets up the display itself, with internal-RAM DMA draw buffers, and LVGL code stays out of IRAM.**
+  - The BSP's 50-line PSRAM draw buffers made the SPI driver allocate a 46 KB internal bounce buffer on every flush. Once audio was in, it failed with `ESP_ERR_NO_MEM` and the screen stopped updating.
+  - *Rejected:* DMA straight from PSRAM (`psram_dma_direct`). It underflowed at 40 MHz QSPI (`DMA TX underflow`) while the CPU also fetched code from PSRAM.
+  - *Rejected:* `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` (Waveshare's setting). It placed 105 KB of LVGL code in internal SRAM. Without it the internal heap has 116 KB free (low-water 83 KB) instead of 44 KB (8 KB); BLE needs that room. Phase 8 measures the render cost.
+- **D17 The device measures speech per clip (`voiced_ms` in `CLIP_ENDED`), and the app does not prompt SamBot below a threshold.** SamBot's transcriber turned a silent clip into "Thank you."
+  - *Rejected:* app-side detection. It would need Opus decoding on the phone, or Whisper's `no_speech_prob`, which SamBot's `/voice/transcribe` does not return.
 
 ## Risks and unverified items
 
 - The ~0.33 mA Standby floor from R9 is inferred from the schematic, not measured.
-- Whether the PMIC keeps its ON-time and OFF-time settings across Off is unknown. It sets the from-Off latency.
+- Whether the PMIC keeps its ON-time and OFF-time settings across Off is unknown. It sets the from-Off latency. (PWROK delay is 8 ms, register 0x25 = 0x18.)
+- A cold-started capture begins with about 40 ms of digital silence while the ES7210 settles, followed by a faint −59 dBFS click. It is counted in the latency figures.
 - CO5300 at 80 MHz QSPI is untested.
 - IMU INT1 on GPIO21 conflicts with Waveshare's pin table.
 - Android presence-detection latency, force-stop behaviour, and your phone maker's battery manager are unverified.

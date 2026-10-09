@@ -161,3 +161,26 @@ Meanings per XPowersLib; datasheet not checked.
 - **Capture stack:** the Opus encoder peaks at about 23.8 KB, so the capture task has 32 KB.
 - **Internal RAM after audio:** 56 KB free, with a dip to 13 KB at some point. This must be fixed before BLE (phase 4); move buffers and possibly stacks to PSRAM.
 - **Amplifier:** opening the ES8311 switches the amplifier (GPIO46) on. The firmware keeps it off and the DAC muted except during playback.
+
+## Wake timing and memory (2026-10-09)
+
+**Standby → recording** (`ptttest 10`; the reference is the timer alarm, so ROM and bootloader time are included):
+
+| Step | Time |
+|---|---|
+| Wake → `app_main` (ROM, bootloader without image check, PSRAM XIP copy) | 112–115 ms |
+| `app_main` → first 20 ms audio frame in RAM | 95–115 ms |
+| `app_main` → clip file open | 98–120 ms (one 162 ms outlier; I2S DMA buffering covers it) |
+| **Wake → first audio frame** | **208–229 ms** |
+
+- The first ~40 ms of a cold-started capture are digital silence (ES7210 settling). A faint click at −59 dBFS follows, then a floor near −70 dBFS.
+- PWROK delay: 8 ms (AXP2101 register 0x25 = 0x18, bits 1:0 = 0).
+- Cold boot after a software reset reaches `app_main` at about 290 ms.
+- Not yet trimmed:
+  - The speaker codec could start after the microphones.
+  - The image's XIP copy into PSRAM happens on every boot.
+
+**Internal RAM.** The heap starts at about 286 KB (265 + 21 KB).
+- LVGL with `CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM` put 105 KB of code in IRAM; it is now off.
+- The capture task stack (32 KB) stays internal because that task writes flash.
+- With the display in internal DMA buffers (2 × 22 KB), 116 KB is free after boot, with a low-water mark of 83 KB.
