@@ -39,7 +39,7 @@ $PY sim/host/tools/vlink.py
 $PY sim/host/coinsim.py --ble tcp-client:127.0.0.1:9101 --power-on      # then open http://127.0.0.1:8740/
 $PY sim/host/tools/central.py --passkey-from http://127.0.0.1:8740/api/state --keys /tmp/phone.json hello list "get 1 0"
 
-# With the Android emulator: the coin on the emulator's Bluetooth (netsim)
+# With the Android emulator: the coin on the emulator's Bluetooth (netsim, which the emulator starts)
 $SDK/emulator/emulator.exe -avd coinai_api36
 $PY sim/host/coinsim.py --power-on
 cd android && ./gradlew installDebug
@@ -55,7 +55,7 @@ The emulator runs only with Windows Hypervisor Platform (WHPX) enabled. That nee
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All   # admin PowerShell, then reboot
 ```
 
-The AVD `coinai_api36` (Android 16, Google APIs, x86_64, Pixel 7) is already created. Bluetooth in the emulator is netsim; `coinsim.py`'s default `--ble android-netsim` joins it, and the app finds the coin as `coinai` at C0:1A:51:00:00:01 (static random; see IPC.md, "Bluetooth address"). Pairing asks for the passkey shown on the simulated coin's screen and on the page. **Not yet run:** this path waits for WHPX. Everything above the radio is the same code the vlink tests run, but netsim itself, and the app's companion-device pairing in the emulator, are untested.
+The AVD `coinai_api36` (Android 16, Google APIs, x86_64, Pixel 7) is already created. Bluetooth in the emulator is netsim; `coinsim.py`'s default `--ble android-netsim` joins it, and the app finds the coin as `coinai` at C0:1A:51:00:00:01 (static random; see IPC.md, "Bluetooth address"). Pairing asks for the passkey shown on the simulated coin's screen and on the page. netsim itself is verified without the emulator: with `netsimd.exe --no-shutdown` running standalone, `coinsim.py` (default `--ble`) and `central.py --transport android-netsim --random` paired, re-encrypted with the bond, and moved a clip at 35 kB/s with the 15 ms interval applied. **Not yet run:** Android itself, meaning the app's companion-device pairing, background delivery and the emulator's Bluetooth stack. That waits for WHPX.
 
 ## Tests
 
