@@ -40,14 +40,15 @@ Console commands (type `help` on the console for the full list):
 |---|---|
 | `pmic`, `pmic reg <hex> [<hex>]`, `pmic chg <mA>` | PMIC status, raw registers, charge current |
 | `i2cscan`, `imu`, `stats` | bus scan, one IMU sample; `stats`: internal RAM at each boot step, every internal allocation of 2 KB or more with a backtrace (`addr2line -e build/coinai.elf`), heap now |
-| `rec <s>`, `clips`, `clip get <id>`, `clip rm <id\|all>` | record, list, dump, delete clips |
+| `rec <s>`, `rec start\|stop`, `clips`, `clip get <id>`, `clip rm <id\|all>` | record (blocking, or start and stop without waiting), list, dump, delete clips |
 | `clip meta <id> [redo]` | a clip's metadata; `redo` drops it first, so the cut-off-clip recovery recomputes it |
 | `ble`, `ble bench [on\|off]`, `ble forget`, `ble adv off\|idle\|deliver`, `ble txpower <dBm>` | BLE state and RSSI, bench mode (no pairing, until reboot), delete bonds, advertising mode, radio power |
 | `play <id>`, `tone [hz] [ms]`, `level`, `loopback [hz]` | speaker and microphone checks |
 | `sleep [s] [rec]` | standby; wakes on PWR, or after `s` seconds (`rec`: the wake records like a PWR hold) |
 | `ptttest [n]`, `pttlog [clear]`, `wake` | unattended standby→record latency trials and the latency records |
 | `poweroff` | PMIC off; PWR turns the board back on |
-| `fbdump`, `reboot` | screen dump, restart |
+| `ble inject <hex>`, `ble inject off` | feed a ctrl TLV to the protocol layer over USB; answers print as `BLE-CTRL`/`BLE-DATA` lines (`bletest.py --serial`) |
+| `fbdump`, `reboot`, `wdtest` | screen dump, restart, stall a task under the watchdog (expect a reboot, reset reason 6) |
 
 - `scripts/idf` wraps EIM's PowerShell activation script. It removes `MSYSTEM` first, because `idf.py` silently does nothing (and exits 0) when it sees Git Bash.
 - COM9 is the coin. COM8 is an unrelated USB serial device (VID 1D50, PID 615E); never flash it.

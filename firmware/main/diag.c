@@ -318,9 +318,11 @@ static int cmd_clip(int argc, char **argv)
                 clipstore_remove(list[i].id);
             }
             printf("removed %d clips\n", n);
+            ble_clips_changed();
             return 0;
         }
         esp_err_t err = clipstore_remove((uint16_t)atoi(argv[2]));
+        ble_clips_changed();
         printf("%s\n", err == ESP_OK ? "removed" : "no such clip");
         return err == ESP_OK ? 0 : 1;
     }

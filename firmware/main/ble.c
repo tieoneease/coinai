@@ -48,7 +48,7 @@ enum { ERR_UNKNOWN_CLIP = 1, ERR_BAD_OFFSET = 2, ERR_BAD_LENGTH = 3, ERR_BUSY = 
 #define MAX_LIST       256
 #define FAST_ADV_MS    30000
 
-typedef enum { EV_RX, EV_CLIP_STARTED, EV_CLIP_FINISHED, EV_STATUS, EV_CONNECTED, EV_DISCONNECTED } ev_type_t;
+typedef enum { EV_RX, EV_CLIP_STARTED, EV_CLIP_FINISHED, EV_STATUS, EV_CLIPS_CHANGED, EV_CONNECTED, EV_DISCONNECTED } ev_type_t;
 typedef struct {
     ev_type_t type;
     uint16_t len;
@@ -556,6 +556,10 @@ static void worker_task(void *arg)
             case EV_STATUS:
                 send_status();
                 break;
+            case EV_CLIPS_CHANGED:
+                refresh_pending();
+                send_status();
+                break;
             case EV_CONNECTED: {
                 tx_stop();  // nothing from an earlier link carries over
                 // PROTOCOL.md "Link". The phone, as GATT client, asks for the 247-byte MTU.
@@ -893,6 +897,13 @@ void ble_clip_event(const audio_clip_result_t *clip, bool started)
     uint8_t id[2];
     put16(id, clip->id);
     post(started ? EV_CLIP_STARTED : EV_CLIP_FINISHED, id, 2);
+}
+
+void ble_clips_changed(void)
+{
+    if (s_ev) {
+        post(EV_CLIPS_CHANGED, NULL, 0);
+    }
 }
 
 void ble_inject(const uint8_t *tlv, size_t len)

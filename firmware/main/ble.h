@@ -38,6 +38,8 @@ bool ble_busy(void);
 void ble_note_device_status(int battery_pct, bool charging, bool usb_power, bool recording);
 // From the audio callback (must not block).
 void ble_clip_event(const audio_clip_result_t *clip, bool started);
+// Clips were removed outside the protocol (console): recount the pending clips and send STATUS.
+void ble_clips_changed(void);
 // Bench mode: protocol messages accepted without pairing, until the next reboot. USB console only.
 void ble_set_bench(bool on);
 // USB console test link (`ble inject <hex>`): feeds one ctrl TLV to the protocol worker as if the
