@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coinsim</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23222' stroke='%23c9a86a' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span>coinsim</div>
+  <div class="pill" id="pill-power" data-tone="off"><span class="dot"></span><span id="pill-power-text">Off</span></div>
+  <div class="pill" id="pill-ble" data-tone="off"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7L8 15V1l3.5 3.5-7 7"/></svg><span id="pill-ble-text">Bluetooth</span></div>
+  <div class="spacer"></div>
+  <div class="pill" id="pill-ws" data-tone="off"><span class="dot"></span><span id="pill-ws-text">connecting</span></div>
+</header>
+
+<section class="signals" aria-label="Signals">
+  <div class="sig" data-sig="gpio3_pwr"><b>GPIO3</b><i>PWR</i><span class="lvl">–</span></div>
+  <div class="sig" data-sig="gpio0_boot"><b>GPIO0</b><i>BOOT</i><span class="lvl">–</span></div>
+  <div class="sig" data-sig="gpio11_tp_int"><b>GPIO11</b><i>TP INT</i><span class="lvl">–</span></div>
+  <div class="sig" data-sig="gpio21_imu_int1"><b>GPIO21</b><i>IMU INT1</i><span class="lvl">–</span></div>
+  <div class="sig out" data-sig="gpio46_amp"><b>GPIO46</b><i>AMP</i><span class="lvl">–</span></div>
+  <div class="sig out" data-sig="gpio1_lcd_rst"><b>GPIO1</b><i>LCD RST</i><span class="lvl">–</span></div>
+  <div class="sig out" data-sig="gpio2_tp_rst"><b>GPIO2</b><i>TP RST</i><span class="lvl">–</span></div>
+  <div class="sig rail" data-sig="dcdc1"><b>DCDC1</b><i>3V3</i><span class="lvl">–</span></div>
+  <div class="sig rail" data-sig="aldo1"><b>ALDO1</b><i>audio</i><span class="lvl">–</span></div>
+  <div class="sig" data-sig="mic"><b>MIC</b><i>capture</i><span class="lvl">–</span></div>
+</section>
+
+<main class="layout">
+  <section class="stage" aria-label="The coin">
+    <div class="zoom" role="group" aria-label="Zoom">
+      <button data-zoom="1" aria-pressed="true">1×</button><button data-zoom="1.5">1.5×</button><button data-zoom="2">2×</button>
+    </div>
+    <div class="coin" id="coin">
+      <div class="bezel">
+        <div class="glass" id="glass">
+          <canvas id="screen" width="466" height="466" aria-label="Display, 466 by 466; click or drag to touch"></canvas>
+          <div class="screen-off" id="screen-off"></div>
+          <div class="touch-dot" id="touch-dot"></div>
+        </div>
+      </div>
+      <button class="side-btn" id="btn-pwr" data-btn="pwr" style="--a:-24deg" aria-label="PWR button (hold; keyboard Space)"><span>PWR</span></button>
+      <button class="side-btn" id="btn-boot" data-btn="boot" style="--a:24deg" aria-label="BOOT button (hold; keyboard B)"><span>BOOT</span></button>
+    </div>
+    <p class="hint">Hold <kbd>Space</kbd> for PWR, <kbd>B</kbd> for BOOT. Both for 3 s: power off. Click the screen to touch.</p>
+
+    <div class="panel" id="panel-power">
+      <h2>Power</h2>
+      <div class="power-head">
+        <div class="power-state" id="power-state">Off</div>
+        <button class="btn danger" id="cut-power" title="Pull the battery and the USB cable">Cut power</button>
+      </div>
+      <div class="standby" id="standby" hidden>
+        <div class="bar"><div class="bar-fill" id="standby-bar"></div></div>
+        <div class="small" id="standby-text"></div>
+      </div>
+      <dl class="kv">
+        <dt>Last reset</dt><dd id="pw-reset">–</dd>
+        <dt>Boot count</dt><dd id="pw-boots">0</dd>
+        <dt>Uptime</dt><dd id="pw-uptime">–</dd>
+        <dt>RTC clock</dt><dd id="pw-rtc">–</dd>
+        <dt>Firmware</dt><dd id="pw-fw">–</dd>
+        <dt>Process</dt><dd id="pw-proc">–</dd>
+      </dl>
+      <p class="error" id="pw-error" hidden></p>
+    </div>
+  </section>
+
+  <div class="panels">
+    <section class="panel" id="panel-battery">
+      <h2>Battery &amp; USB</h2>
+      <div class="row">
+        <button class="switch" role="switch" id="sw-battery" aria-checked="true"><span class="knob"></span>Battery</button>
+        <button class="switch" role="switch" id="sw-usb" aria-checked="true"><span class="knob"></span>USB cable</button>
+        <span class="chip" id="chg-chip">–</span>
+      </div>
+      <label class="field">
+        <span class="field-label">Battery <output id="bat-out">4.20 V · 100 %</output></span>
+        <input type="range" id="bat-volts" min="2.90" max="4.20" step="0.01" value="4.20">
+      </label>
+      <div class="row">
+        <span class="field-label">Simulate</span>
+        <div class="seg" id="sim-speed" role="group" aria-label="Charge and drain simulation speed">
+          <button data-v="0" aria-pressed="true">Frozen</button><button data-v="1">1×</button><button data-v="60">60×</button><button data-v="600">600×</button>
+        </div>
+      </div>
+      <dl class="kv cols">
+        <dt>VBAT</dt><dd id="pm-vbat">–</dd>
+        <dt>VBUS</dt><dd id="pm-vbus">–</dd>
+        <dt>VSYS</dt><dd id="pm-vsys">–</dd>
+        <dt>Die temp</dt><dd id="pm-temp">–</dd>
+        <dt>STATUS1/2</dt><dd id="pm-status">–</dd>
+        <dt>Percent reg</dt><dd id="pm-pct">–</dd>
+        <dt>DCDC1</dt><dd id="pm-dcdc1">–</dd>
+        <dt>ALDO1</dt><dd id="pm-aldo1">–</dd>
+        <dt>Charge current</dt><dd id="pm-icc">–</dd>
+        <dt>PWR key</dt><dd id="pm-key">–</dd>
+      </dl>
+    </section>
+
+    <section class="panel" id="panel-motion">
+      <h2>Motion</h2>
+      <div class="motion">
+        <div class="joy" id="joy" tabindex="0" aria-label="Tilt joystick: drag, or arrow keys">
+          <div class="joy-ring"></div><div class="joy-knob" id="joy-knob"></div>
+        </div>
+        <div class="motion-side">
+          <div class="tilt" id="tilt">pitch 0° · roll 0°</div>
+          <label class="field">
+            <span class="field-label">Yaw rate <output id="yaw-out">0 °/s</output></span>
+            <input type="range" id="yaw" min="-300" max="300" step="5" value="0">
+          </label>
+          <div class="row">
+            <button class="btn" id="tap">Tap</button>
+            <button class="btn" id="shake">Shake</button>
+            <button class="btn ghost" id="level">Level</button>
+          </div>
+        </div>
+      </div>
+      <div class="axes">
+        <div class="axis-group"><span class="axis-title">Accel <em id="imu-acc-state"></em></span>
+          <div class="axis" data-ax="a0"><b>X</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+          <div class="axis" data-ax="a1"><b>Y</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+          <div class="axis" data-ax="a2"><b>Z</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+        </div>
+        <div class="axis-group"><span class="axis-title">Gyro <em id="imu-gyr-state"></em></span>
+          <div class="axis" data-ax="g0"><b>X</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+          <div class="axis" data-ax="g1"><b>Y</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+          <div class="axis" data-ax="g2"><b>Z</b><div class="ab"><div class="af"></div></div><span>–</span></div>
+        </div>
+      </div>
+      <p class="small">Values the QMI8658 data registers hold (they freeze while CTRL7 turns the sensors off).</p>
+    </section>
+
+    <section class="panel" id="panel-audio">
+      <h2>Audio</h2>
+      <div class="row">
+        <span class="field-label">Microphone</span>
+        <div class="seg" id="mic-src" role="group" aria-label="Microphone source">
+          <button data-v="silence" aria-pressed="true">Silence</button><button data-v="tone">Tone</button><button data-v="file">File</button><button data-v="browser">Browser mic</button>
+        </div>
+      </div>
+      <div class="row" id="tone-row" hidden>
+        <label class="inline">Frequency <input type="number" id="tone-hz" min="20" max="7900" step="10" value="1000"> Hz</label>
+        <label class="inline">Level <input type="number" id="tone-db" min="-90" max="0" step="1" value="-20"> dBFS</label>
+      </div>
+      <div class="row" id="file-row" hidden>
+        <select id="file-sel" aria-label="Audio file"></select>
+        <label class="inline"><input type="checkbox" id="file-loop"> Loop</label>
+        <label class="btn ghost upload">Upload…<input type="file" id="file-up" accept="audio/*,.ogg,.opus,.wav"></label>
+      </div>
+      <p class="small" id="browser-mic-note" hidden></p>
+      <div class="meter-row"><span class="lamp" id="mic-lamp"></span><span class="meter-label">Mic</span><div class="meter"><div class="meter-fill" id="mic-meter"></div></div><output id="mic-db">–</output></div>
+      <div class="meter-row"><span class="lamp" id="amp-lamp"></span><span class="meter-label">Speaker</span><div class="meter"><div class="meter-fill" id="spk-meter"></div></div><output id="spk-db">–</output></div>
+      <div class="row">
+        <button class="switch" role="switch" id="sw-mute" aria-checked="false"><span class="knob"></span>Mute</button>
+        <label class="field grow"><span class="field-label">Volume <output id="vol-out">80 %</output></span>
+          <input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></label>
+        <button class="btn ghost" id="audio-enable" hidden>Enable sound</button>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-ble">
+      <h2>Bluetooth</h2>
+      <div class="radio-line"><span class="lamp" id="radio-lamp"></span><span id="radio-text">–</span></div>
+      <dl class="kv">
+        <dt>Address</dt><dd id="ble-addr">–</dd>
+        <dt>Advertising</dt><dd id="ble-adv">–</dd>
+        <dt>Connection</dt><dd id="ble-conn">–</dd>
+        <dt>Security</dt><dd id="ble-sec">–</dd>
+        <dt>Subscribed</dt><dd id="ble-sub">–</dd>
+        <dt>Bonds</dt><dd><span id="ble-bonds">0</span> <button class="btn ghost tiny" id="ble-forget">Forget</button></dd>
+      </dl>
+      <div class="passkey" id="passkey" hidden><span>Passkey</span><strong id="passkey-num">000000</strong></div>
+      <label class="field">
+        <span class="field-label">RSSI <output id="rssi-out">-55 dBm</output></span>
+        <input type="range" id="rssi" min="-100" max="-30" step="1" value="-55">
+      </label>
+      <div class="row"><button class="switch" role="switch" id="sw-oor" aria-checked="false"><span class="knob"></span>Out of range</button></div>
+      <div class="log-head"><h3>Traffic</h3><label class="inline small"><input type="checkbox" id="log-data" checked> data</label><button class="btn ghost tiny" id="log-clear">Clear</button></div>
+      <ol class="blelog" id="blelog" aria-live="off"></ol>
+    </section>
+  </div>
+</main>
+
+<section class="console-wrap" aria-label="Serial console">
+  <div class="console-head"><h2>Console</h2><span class="small">USB serial: the coin's stdout and stdin</span><div class="spacer"></div><button class="btn ghost tiny" id="con-clear">Clear</button></div>
+  <pre class="console" id="console"></pre>
+  <form class="console-in" id="con-form" autocomplete="off">
+    <span class="prompt">›</span><input id="con-input" spellcheck="false" placeholder="command for the coin's console (↑/↓ history)" aria-label="Console input">
+  </form>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+__pycache__/
+.pytest_cache/
+# Run state. Each data dir also holds its own "*" .gitignore, which is what keeps the default sim/.data/ out of git.
+.data/

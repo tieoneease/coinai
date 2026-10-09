@@ -53,3 +53,7 @@ Console commands (type `help` on the console for the full list):
 - `scripts/idf` wraps EIM's PowerShell activation script. It removes `MSYSTEM` first, because `idf.py` silently does nothing (and exits 0) when it sees Git Bash.
 - COM9 is the coin. COM8 is an unrelated USB serial device (VID 1D50, PID 615E); never flash it.
 - Recovery: the full factory image is in `backup/` (see HARDWARE.md, "Factory state").
+
+## Simulator
+
+The firmware also builds for Windows and runs with a browser UI, software buttons, a joystick for the IMU, and virtual Bluetooth to the Android emulator: see [sim/README.md](sim/README.md).

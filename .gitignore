@@ -13,6 +13,10 @@ android/local.properties
 android/.idea/
 *.apk
 
+# Desktop simulator: the coinsim.exe build and the simulated coins' flash (LittleFS, NVS, bonds)
+sim/coin/build/
+sim/.data/
+
 # Factory flash backup: 32 MB and device-specific. The hash and eFuse report stay tracked;
 # a second copy lives in Documents/coinai-factory-backup.
 backup/*.bin
