@@ -52,7 +52,7 @@ The intervals follow Apple's Accessory Design Guidelines §58.5. They are harmle
 | app → device | `REPLY` | clip id, state (`transcribing`, `thinking`, `done`, `failed`), text: UTF-8 plain text of at most 200 bytes, cut at a character boundary |
 | device → app | `STATUS` | battery %, charging, pending clip count, recording flag, firmware version |
 | device → app | `CLIP_STARTED` | clip id, codec (`ogg-opus`), sample rate, estimated start UTC ms |
-| device → app | `CLIP_ENDED` | clip id, size in bytes, duration ms, CRC-32, voiced ms |
+| device → app | `CLIP_ENDED` | clip id, size in bytes, duration ms, CRC-32, voiced ms, start UTC ms |
 | device → app | `LIST_RESULT` | clip ids, sizes, complete/in-progress flags |
 
 **`data`** (notify):
@@ -74,11 +74,14 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 | `0x07` | `REPLY` | `clip u16`, `state u8` (0 transcribing, 1 thinking, 2 done, 3 failed), `text` (\≤ 200 bytes) |
 | `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording), `pending u16`, `fw_version` (\≤ 32 bytes) |
 | `0x82` | `CLIP_STARTED` | `clip u16`, `codec u8` (1 = Ogg Opus), `sample_rate u32`, `start_utc_ms u64` (0 = unknown) |
-| `0x83` | `CLIP_ENDED` | `clip u16`, `size u32`, `duration_ms u32`, `crc32 u32`, `voiced_ms u32` (time with speech-level audio; the app does not prompt SamBot for a clip below its threshold) |
+| `0x83` | `CLIP_ENDED` | `clip u16`, `size u32`, `duration_ms u32`, `crc32 u32`, `voiced_ms u32` (time with speech-level audio; the app does not prompt SamBot for a clip below its threshold; `0xFFFFFFFF` = unknown, for a clip recovered after power loss), `start_utc_ms u64` (0 = unknown) |
 | `0x84` | `LIST_RESULT` | `flags u8` (bit 0 = more messages follow), then entries of `clip u16`, `size u32`, `flags u8` (bit 0 complete), up to 34 per message |
 | `0x85` | `ERROR` | `request_type u8`, `code u8` (1 unknown clip, 2 bad offset, 3 bad length, 4 busy, 5 invalid value), `clip u16` (`0xFFFF` if none) |
 
 - **CRC-32:** IEEE 802.3, the same as zlib's `crc32`, taken over the whole `.ogg` file.
+- **Which messages are unsolicited:** `STATUS` (also whenever battery, charging, recording or the pending count changes) and `CLIP_STARTED` (a recording began during the connection; the app may `GET` it at once and receive it as it is recorded). Everything else answers a request.
+- **Answers:** `HELLO` → `STATUS`. `LIST` → one or more `LIST_RESULT`. `GET` → data packets, then `CLIP_ENDED`. A matching `ACK` → `STATUS` with the new pending count; a refused one → `ERROR`. A malformed or invalid request → `ERROR`.
+- **A new `GET` replaces a running one;** the replaced transfer gets no `CLIP_ENDED`.
 - **Clip ids:** `u16`, increasing, kept across reboots in NVS. They wrap after 65535.
 - **On connect:** the device answers `HELLO` with `STATUS`.
 
@@ -91,7 +94,7 @@ Device Information (0x180A) and Battery (0x180F, with level notifications).
 1. **Clips are Ogg Opus files** (RFC 7845): 16 kHz mono, about 24 kbps. The app can store, play or upload them unchanged.
 2. **The device deletes a clip only after an `ACK` whose CRC matches.** Unacknowledged clips survive power loss and reboots, and they are never deleted automatically.
 3. **Transfers are idempotent and resumable.** After any disconnect the app sends `GET` with the last byte offset it stored.
-4. **Time.** There is no RTC chip, so `HELLO` sets the device clock. Clips recorded from Off carry an estimated start time; the app corrects it using receive time minus duration.
+4. **Time.** There is no RTC chip, so `HELLO` sets the device clock, and it survives Standby but not Off. `CLIP_ENDED` carries the clip's start time when the device knew the time while recording; otherwise it is 0 and the app estimates it as receive time minus duration.
 5. **Versioning.** `HELLO` carries the protocol version. Unknown TLV types are ignored, so either side can add messages without breaking the other.
 6. **One message per ATT operation.** A TLV fits in one write or indication: at most 244 bytes at MTU 247. Longer results, such as a long `LIST_RESULT`, are split across several messages.
 7. **Reply window.**

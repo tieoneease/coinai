@@ -148,7 +148,7 @@ sealed class CtrlMessage {
         override val type: Int get() = MessageType.CLIP_STARTED
     }
 
-    data class ClipEnded(val clip: Int, val size: Long, val durationMs: Long, val crc32: Long, val voicedMs: Long) : CtrlMessage() {
+    data class ClipEnded(val clip: Int, val size: Long, val durationMs: Long, val crc32: Long, val voicedMs: Long, val startUtcMs: Long = 0) : CtrlMessage() {
         override val type: Int get() = MessageType.CLIP_ENDED
     }
 
@@ -196,7 +196,7 @@ sealed class CtrlMessage {
                 v.restString(fwVersion, Protocol.MAX_FW_VERSION_BYTES, "fw_version")
             }
             is ClipStarted -> { v.u16(clip); v.u8(codec); v.u32(sampleRate); v.u64(startUtcMs) }
-            is ClipEnded -> { v.u16(clip); v.u32(size); v.u32(durationMs); v.u32(crc32); v.u32(voicedMs) }
+            is ClipEnded -> { v.u16(clip); v.u32(size); v.u32(durationMs); v.u32(crc32); v.u32(voicedMs); v.u64(startUtcMs) }
             is ListResult -> {
                 require(entries.size <= Protocol.MAX_LIST_ENTRIES) { "LIST_RESULT holds at most ${Protocol.MAX_LIST_ENTRIES} entries" }
                 v.u8(if (more) 1 else 0)
@@ -239,7 +239,7 @@ sealed class CtrlMessage {
                     Status(battery, flags and 1 != 0, flags and 2 != 0, flags and 4 != 0, r.u16(), r.restString())
                 }
                 MessageType.CLIP_STARTED -> ClipStarted(r.u16(), r.u8(), r.u32(), r.u64())
-                MessageType.CLIP_ENDED -> ClipEnded(r.u16(), r.u32(), r.u32(), r.u32(), r.u32())
+                MessageType.CLIP_ENDED -> ClipEnded(r.u16(), r.u32(), r.u32(), r.u32(), r.u32(), r.u64())
                 MessageType.LIST_RESULT -> {
                     val more = r.u8() and 1 != 0
                     if (r.remaining % CLIP_ENTRY_SIZE != 0) throw ProtocolException("LIST_RESULT entries are not $CLIP_ENTRY_SIZE-byte aligned")

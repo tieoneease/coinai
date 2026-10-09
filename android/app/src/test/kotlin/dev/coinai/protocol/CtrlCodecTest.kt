@@ -77,7 +77,7 @@ class CtrlCodecTest {
     fun largeUnsignedValuesRoundTrip() {
         val msgs = listOf(
             CtrlMessage.Ack(0xFFFF, 0xFFFF_FFFFL),
-            CtrlMessage.ClipEnded(65535, 0xFFFF_FFFFL, 0x8000_0000L, 0xDEAD_BEEFL, 0xFFFF_FFFFL),
+            CtrlMessage.ClipEnded(65535, 0xFFFF_FFFFL, 0x8000_0000L, 0xDEAD_BEEFL, 0xFFFF_FFFFL, Long.MAX_VALUE),
             CtrlMessage.Error(MessageType.GET, ErrorCode.BUSY, Protocol.NO_CLIP),
             CtrlMessage.CfgSet(CfgKey.OFF_AFTER_H, 0xFFFF),
             CtrlMessage.Status(Protocol.BATTERY_UNKNOWN, true, false, true, 65535, ""),

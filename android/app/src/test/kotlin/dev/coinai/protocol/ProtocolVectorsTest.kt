@@ -96,7 +96,7 @@ class ProtocolVectorsTest {
             fwVersion = f.str("fw_version"),
         )
         "CLIP_STARTED" -> CtrlMessage.ClipStarted(f.int("clip"), f.int("codec"), f.long("sample_rate"), f.long("start_utc_ms"))
-        "CLIP_ENDED" -> CtrlMessage.ClipEnded(f.int("clip"), f.long("size"), f.long("duration_ms"), f.long("crc32"), f.long("voiced_ms"))
+        "CLIP_ENDED" -> CtrlMessage.ClipEnded(f.int("clip"), f.long("size"), f.long("duration_ms"), f.long("crc32"), f.long("voiced_ms"), f.long("start_utc_ms"))
         "LIST_RESULT" -> CtrlMessage.ListResult(
             more = f.getValue("more").jsonPrimitive.boolean,
             entries = f.getValue("entries").jsonArray.map {
@@ -128,7 +128,7 @@ class ProtocolVectorsTest {
             put("clip", m.clip); put("codec", m.codec); put("sample_rate", m.sampleRate); put("start_utc_ms", m.startUtcMs)
         }
         is CtrlMessage.ClipEnded -> buildJsonObject {
-            put("clip", m.clip); put("size", m.size); put("duration_ms", m.durationMs); put("crc32", m.crc32); put("voiced_ms", m.voicedMs)
+            put("clip", m.clip); put("size", m.size); put("duration_ms", m.durationMs); put("crc32", m.crc32); put("voiced_ms", m.voicedMs); put("start_utc_ms", m.startUtcMs)
         }
         is CtrlMessage.ListResult -> buildJsonObject {
             put("more", m.more)
