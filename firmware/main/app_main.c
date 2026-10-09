@@ -36,8 +36,13 @@ static const char *TAG = "coinai";
 // Idle time before standby on battery, or before the screen goes off on USB power.
 #define IDLE_S              30
 #define POWEROFF_COMBO_MS   3000
+// A wake by PWR counts as a tap (screen on, no clip) when the whole press is shorter than this.
+#define WAKE_TAP_MS         300
+// Deep-sleep wake to power_boot(), measured with ptttest (112-115 ms). PWR wakes have no
+// timestamp of their own, so their press length is estimated with it.
+#define WAKE_TO_BOOT_MS     113
 
-typedef enum { CTL_CLIP, CTL_STANDBY, CTL_POWEROFF } ctl_type_t;
+typedef enum { CTL_CLIP, CTL_STANDBY, CTL_POWEROFF, CTL_WAKE_WAS_TAP } ctl_type_t;
 typedef struct {
     ctl_type_t type;
     audio_clip_result_t clip;
@@ -113,10 +118,17 @@ static void on_input(input_event_t ev, uint32_t held_ms, void *ctx)
             esp_timer_stop(s_combo_timer);
             break;
         }
-        if (s_wake_hold) {  // end of the hold that woke us: always a recording, never a tap
+        if (s_wake_hold) {  // end of the press that woke us
             s_wake_hold = false;
-            audio_rec_stop(false);
-            ESP_LOGI(TAG, "PWR up: wake recording ends");
+            int64_t ref = power_ref_to_boot_us();
+            int64_t pressed_ms = power_ticks_to_us(power_boot_ticks(), power_rtc_ticks()) / 1000 +
+                                 (ref >= 0 ? ref / 1000 : WAKE_TO_BOOT_MS);
+            bool tap = pressed_ms < WAKE_TAP_MS;
+            audio_rec_stop(tap);
+            ESP_LOGI(TAG, "PWR up: wake press of ~%lld ms%s", pressed_ms, tap ? " (tap: no recording)" : "");
+            if (tap) {
+                post(CTL_WAKE_WAS_TAP, NULL);
+            }
             break;
         }
         audio_rec_stop(held_ms < TAP_MS);
@@ -208,7 +220,7 @@ static void control_loop(lv_display_t *disp)
                     break;
                 }
                 wake_clip_pending = false;
-                if (m.clip.id) {
+                if (m.clip.id && !m.clip.discarded) {
                     log_wake_recording(&m.clip);
                 }
                 if (s_wake == WAKE_TIMER_TEST) {
@@ -224,6 +236,9 @@ static void control_loop(lv_display_t *disp)
                 break;
             case CTL_POWEROFF:
                 power_off();
+                break;
+            case CTL_WAKE_WAS_TAP:
+                linger = false;  // a screen-on wake: normal idle rules
                 break;
             }
         }
