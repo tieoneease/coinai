@@ -1,0 +1,19 @@
+# ESP-IDF
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+
+# Factory flash backup: 32 MB and device-specific. The hash and eFuse report stay tracked;
+# a second copy lives in Documents/coinai-factory-backup.
+backup/*.bin
+backup/*.log

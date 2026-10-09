@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>coinai — push-to-talk flow</title>
+<style>
+  body { margin: 0; padding: 28px 32px; background: #fff; color: #1d1d1f;
+         font: 14px/1.45 "Segoe UI", system-ui, sans-serif; width: 1180px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; color: #555; }
+  .row { display: flex; gap: 24px; align-items: stretch; margin-bottom: 24px; }
+  .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 8px; }
+  .states { flex: 0 0 520px; }
+  .side { flex: 1; }
+  .seq { width: 100%; box-sizing: border-box; }
+  .seq pre { display: flex; justify-content: center; margin: 0; }
+  .seq pre svg { height: auto; }
+  .note { margin-top: 10px; font-size: 13.5px; color: #444; }
+  .note p { margin: 0 0 10px; }
+  .note b { color: #1d1d1f; }
+</style>
+</head>
+<body>
+<h1>coinai: hold PWR to record, phone receives it in the background</h1>
+<p class="sub">Proposed design. Latencies are targets to be measured on the device, not results.</p>
+<div class="row">
+  <div class="card states">
+    <h2>Power states and the PWR (mic) button</h2>
+<pre class="mermaid">
+stateDiagram-v2
+    direction TB
+    Off: Off (PMIC shut down, µA)
+    Standby: Standby (ESP32 deep sleep, ~0.4–0.6 mA est.)
+    Boot: Boot fast path
+    Active: Active (screen on)
+    Recording: Recording (Ogg Opus to flash)
+    Delivering: Delivering (BLE, resumable)
+    Off --> Boot: PWR held ≥ PMIC ON-time
+    Standby --> Boot: PWR press wakes GPIO3
+    Boot --> Recording: PWR still held
+    Boot --> Active: PWR already released
+    Active --> Recording: PWR held ≥ 200 ms
+    Recording --> Delivering: PWR released
+    Delivering --> Standby: app ACKed or window over
+    Active --> Standby: idle timeout / PWR tap
+    Standby --> Off: hours unused / low battery
+    Active --> Off: UI power-off / BOOT+PWR 3 s
+</pre>
+  </div>
+  <div class="card side">
+    <h2>What the diagrams assume</h2>
+    <div class="note">
+    <p><b>Press → recording targets:</b> Active &lt; 50 ms · Standby ≤ 400 ms · Off ≤ 700 ms + PMIC ON-time (128 ms–2 s).</p>
+    <p><b>Why PWR is the mic button:</b> it is the only key that can power the board on from Off, and its state reaches the ESP32 on GPIO3 (high while pressed), an RTC pin that can wake deep sleep.</p>
+    <p><b>Why Standby drops the BLE link:</b> the board has no 32 kHz crystal, so holding a connection in light sleep keeps the 40 MHz crystal running. Reconnecting after wake is cheaper.</p>
+    <p><b>Android app wake:</b> the system sees the bonded coin advertising (Companion Device presence) and binds the app's CompanionDeviceService even if the app isn't running. That service starts a short-lived <i>connectedDevice</i> foreground service to sync, which shows a notification only while syncing.</p>
+    <p><b>Network:</b> the companion app is exempt from battery optimization, so it can upload during Doze. Processing runs in WorkManager and retries when offline.</p>
+    <p><b>Out of range:</b> clips stay on flash and transfer on the next connection, resuming from the last byte offset.</p>
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="card seq">
+    <h2>One clip, end to end</h2>
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant D as coinai
+    participant OS as Android (Companion Device)
+    participant A as Your app (background)
+    participant S as Your server (optional)
+    U->>D: hold PWR (device in Standby or Off)
+    D->>D: boot, mics on, record to flash
+    D-->>OS: advertise every 20 ms for 30 s
+    OS->>A: presence: start app's sync service
+    A->>D: HELLO (time sync), subscribe
+    D-->>A: clip bytes, streamed while recording
+    U->>D: release PWR
+    D-->>A: CLIP_ENDED (size, CRC)
+    A->>D: ACK, so the device deletes its copy
+    A->>S: process: upload via WorkManager, or on the phone
+    D->>D: disconnect, back to Standby
+</pre>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', fontFamily: 'Segoe UI, system-ui, sans-serif',
+                       sequence: { useMaxWidth: false, mirrorActors: false, messageFontSize: 15, actorFontSize: 15,
+                                   width: 170, actorMargin: 70, messageMargin: 34, diagramMarginY: 4, bottomMarginAdj: 0 },
+                       state: { useMaxWidth: true } });
+  mermaid.run().then(() => { document.body.dataset.ready = '1'; })
+               .catch(e => { document.body.dataset.ready = 'err'; document.body.dataset.err = String(e); });
+</script>
+</body>
+</html>

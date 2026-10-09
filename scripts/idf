@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run idf.py in the EIM-installed ESP-IDF v5.5.5 environment from Git Bash.
+# Usage: scripts/idf <project-dir> <idf.py args...>
+#   scripts/idf firmware build
+#   scripts/idf firmware -p COM9 flash
+set -euo pipefail
+profile='C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'
+dir="$(cygpath -w "$(cd "$1" && pwd)")"
+shift
+args=""
+for a in "$@"; do args+=" '${a//\'/\'\'}'"; done
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+  "& { . '$profile' *> \$null; Set-Location -LiteralPath '$dir'; idf.py$args; exit \$LASTEXITCODE }"
