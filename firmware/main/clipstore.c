@@ -25,28 +25,33 @@ esp_err_t clipstore_init(void)
         .format_if_mount_failed = true,
     };
     ESP_RETURN_ON_ERROR(esp_vfs_littlefs_register(&conf), TAG, "mount");
-    DIR *dir = opendir(BASE);  // discarded clips whose file was busy until the reboot
-    if (dir) {
-        uint16_t ids[16];
-        int n = 0;
-        struct dirent *e;
-        while ((e = readdir(dir)) != NULL && n < 16) {
-            unsigned id;
-            char ext[8];
-            if (sscanf(e->d_name, "%5u.%7s", &id, ext) == 2 && strcmp(ext, "dis") == 0 && id && id <= 65535) {
-                ids[n++] = (uint16_t)id;
-            }
-        }
-        closedir(dir);
-        for (int i = 0; i < n; i++) {
-            clipstore_remove(ids[i]);
-            ESP_LOGI(TAG, "clip %u: discarded before the reboot, deleted", ids[i]);
-        }
-    }
     size_t total = 0, used = 0;
     clipstore_usage(&total, &used);
     ESP_LOGI(TAG, "LittleFS mounted: %u KB used of %u KB", (unsigned)(used / 1024), (unsigned)(total / 1024));
     return ESP_OK;
+}
+
+void clipstore_sweep(void)
+{
+    DIR *dir = opendir(BASE);
+    if (!dir) {
+        return;
+    }
+    uint16_t ids[16];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(dir)) != NULL && n < 16) {
+        unsigned id;
+        char ext[8];
+        if (sscanf(e->d_name, "%5u.%7s", &id, ext) == 2 && strcmp(ext, "dis") == 0 && id && id <= 65535) {
+            ids[n++] = (uint16_t)id;
+        }
+    }
+    closedir(dir);
+    for (int i = 0; i < n; i++) {
+        clipstore_remove(ids[i]);
+        ESP_LOGI(TAG, "clip %u: discarded before the reboot, deleted", ids[i]);
+    }
 }
 
 uint16_t clipstore_next_id(void)

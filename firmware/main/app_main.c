@@ -457,6 +457,7 @@ void app_main(void)
     }
     int64_t audio_ready_ms = esp_timer_get_time() / 1000;
     diag_mem_mark("audio");
+    clipstore_sweep();  // until then, tombstoned clips are only hidden
 
     // Everything else.
     ESP_LOGI(TAG, "wake: %s, reset reason %d", power_wake_name(s_wake), (int)esp_reset_reason());

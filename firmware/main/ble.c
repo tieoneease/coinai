@@ -271,6 +271,18 @@ static void send_clip_ended(void)
     send_ctrl(MSG_CLIP_ENDED, v, sizeof v);
 }
 
+// The clip was discarded while streaming: stop with ERROR 1 (tx_stop deletes it once our handle is
+// closed). Returns false for tx_step.
+static bool tx_discarded(void)
+{
+    uint16_t clip = s_tx.clip;
+    tx_stop();
+    send_error(MSG_GET, ERR_UNKNOWN_CLIP, clip);
+    refresh_pending();
+    send_status();
+    return false;
+}
+
 // Sends notifications until the controller's buffers are full, the file runs dry or a burst is done.
 // Returns true when it should run again soon.
 static bool tx_step(void)
@@ -281,13 +293,7 @@ static bool tx_step(void)
         return false;
     }
     if (clipstore_discard_pending(s_tx.clip)) {
-        // Discarded while streaming: stop with ERROR 1 (tx_stop deletes it once our handle is closed).
-        uint16_t clip = s_tx.clip;
-        tx_stop();
-        send_error(MSG_GET, ERR_UNKNOWN_CLIP, clip);
-        refresh_pending();
-        send_status();
-        return false;
+        return tx_discarded();
     }
     if (!s_tx.complete && audio_recording_clip() != s_tx.clip) {
         // Recording ended since the GET: pick up the final size and CRC.
@@ -326,6 +332,9 @@ static bool tx_step(void)
             // A clip still being recorded: reopen later to see the next flushed page.
             fclose(s_tx.f);
             s_tx.f = NULL;
+            if (clipstore_discarded(s_tx.clip)) {
+                return tx_discarded();  // an older discard (tombstone) that the RAM check no longer names
+            }
             vTaskDelay(pdMS_TO_TICKS(100));
             return true;
         }
