@@ -55,8 +55,11 @@ interface ClipStore {
 
     suspend fun markAcked(record: TransferRecord, atMs: Long)
 
-    /** The transfer cannot finish, for example because the coin no longer has the clip. */
-    suspend fun markTransferFailed(record: TransferRecord, reason: String)
+    /**
+     * The coin no longer has the clip (the user discarded it): deletes the part file and the
+     * unfinished record, so the clip leaves no trace and is not shown as failed.
+     */
+    suspend fun discardTransfer(record: TransferRecord)
 }
 
 /** Atomically renames a synced part file to its final name. */

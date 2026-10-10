@@ -73,6 +73,9 @@ interface ClipDao {
         id: Long, size: Long, crc32: Long, durationMs: Long, voicedMs: Long, startedAtMs: Long, receivedAtMs: Long, filePath: String,
     ): Int
 
+    @Query("DELETE FROM clips WHERE id = :id AND state = 'RECEIVING'")
+    suspend fun deleteReceiving(id: Long): Int
+
     @Query("UPDATE clips SET ackedAtMs = :atMs WHERE id = :id")
     suspend fun markAcked(id: Long, atMs: Long)
 

@@ -127,7 +127,8 @@ class ClipProcessor(
     }
 
     private suspend fun promptClaimed(clip: ClipRecord, api: SambotApi, text: String, config: ProcessingSettings, attempt: Int): Outcome {
-        replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.THINKING, ""))
+        // PROTOCOL.md rule 7: `thinking` may carry what SamBot heard; the coin shows it while it waits.
+        replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.THINKING, text))
         val result = try {
             api.ask(text, lane = config.lane, timeout = config.askTimeout)
         } catch (e: PromptNotSentException) {

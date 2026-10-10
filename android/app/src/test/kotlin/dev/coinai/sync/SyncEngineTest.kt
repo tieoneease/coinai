@@ -1,6 +1,7 @@
 package dev.coinai.sync
 
 import dev.coinai.clips.ClipState
+import dev.coinai.protocol.CfgKey
 import dev.coinai.protocol.CtrlMessage
 import dev.coinai.protocol.ErrorCode
 import dev.coinai.protocol.MessageType
@@ -20,6 +21,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.TimeZone
 import java.util.zip.CRC32
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.random.Random
@@ -40,8 +42,11 @@ class SyncEngineTest {
     private fun bytes(n: Int, seed: Int = n) = Random(seed).nextBytes(n)
     private fun crc(b: ByteArray) = CRC32().apply { update(b) }.value
 
-    private fun TestScope.engine(store: ClipStore) =
-        SyncEngine(store, SyncConfig(), listener, clock = { testScheduler.currentTime }, io = EmptyCoroutineContext)
+    /** Virtual time starts at 0, January 1970: New York is on standard time, UTC-5. */
+    private val zone = TimeZone.getTimeZone("America/New_York")
+
+    private fun TestScope.engine(store: ClipStore, clock: () -> Long = { testScheduler.currentTime }) =
+        SyncEngine(store, SyncConfig(), listener, clock = clock, io = EmptyCoroutineContext, timeZone = { zone })
 
     private fun MemoryClips.row(clip: Int) = rows.values.filter { it.clipId == clip }.maxBy { it.id }
 
@@ -83,8 +88,9 @@ class SyncEngineTest {
 
         assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
         assertEquals(CtrlMessage.Hello::class, coin.fromApp.first()::class)
-        assertEquals(CtrlMessage.ListClips, coin.fromApp[1])
-        assertEquals(87, statuses.single().batteryPct)
+        assertEquals(CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, -300), coin.fromApp[1])
+        assertEquals(CtrlMessage.ListClips, coin.fromApp[2])
+        assertEquals(87, statuses.first().batteryPct)
         assertDelivered(store, coin, 3, a)
         assertDelivered(store, coin, 4, b)
         assertEquals(listOf(3, 4), result.acked)
@@ -218,7 +224,7 @@ class SyncEngineTest {
         val result = engine(store).runSession(coin)
 
         assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
-        assertTrue("STATUS shows recording", statuses.single().recording)
+        assertTrue("STATUS shows recording", statuses.first().recording)
         assertEquals(listOf(CtrlMessage.Get(9, 0)), coin.gets)
         assertDelivered(store, coin, 9, full)
     }
@@ -238,20 +244,64 @@ class SyncEngineTest {
     }
 
     @Test
-    fun unknownClipErrorFailsThatClipOnly() = runTest {
+    fun clipGoneBeforeGetIsDroppedWithoutTrace() = runTest {
         val store = MemoryClips(tmp.root)
         val coin = FakeCoin(backgroundScope)
         val keep = bytes(800)
         coin.addClip(10, bytes(800, seed = 1))
         coin.addClip(11, keep)
-        coin.vanishOnGet = setOf(10) // listed, then gone before the GET
+        coin.vanishOnGet = setOf(10) // listed, then discarded before the GET
 
         val result = engine(store).runSession(coin)
 
         assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
         assertTrue(coin.toApp.contains(CtrlMessage.Error(MessageType.GET, ErrorCode.UNKNOWN_CLIP, 10)))
-        assertEquals(ClipState.FAILED, store.row(10).state)
+        assertTrue("no row for clip 10", store.rows.values.none { it.clipId == 10 })
+        assertEquals(emptyList<Int>(), result.unfinished)
         assertDelivered(store, coin, 11, keep)
+    }
+
+    @Test
+    fun clipDiscardedWhileStreamingIsDroppedAndTheNextOneFetched() = runTest {
+        val store = MemoryClips(tmp.root)
+        val coin = FakeCoin(backgroundScope)
+        val next = bytes(1500, seed = 2)
+        coin.addClip(20, bytes(5000, seed = 1))
+        coin.addClip(21, next)
+        coin.discardWhileStreaming = mapOf(20 to 6) // 6 packets of clip 20 arrive, then the user discards it
+
+        val result = engine(store).runSession(coin)
+
+        assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
+        assertTrue(coin.toApp.contains(CtrlMessage.Error(MessageType.GET, ErrorCode.UNKNOWN_CLIP, 20)))
+        assertEquals("one GET for the discarded clip, no retry", listOf(CtrlMessage.Get(20, 0), CtrlMessage.Get(21, 0)), coin.gets)
+        assertTrue("no row for clip 20", store.rows.values.none { it.clipId == 20 })
+        assertTrue("partial data deleted", tmp.root.listFiles()!!.none { it.name.startsWith("20-") })
+        assertTrue("no ACK for clip 20", coin.acks.none { it.clip == 20 })
+        assertEquals(listOf(21), result.acked)
+        assertEquals(emptyList<Int>(), result.unfinished)
+        assertTrue(receivedEvents.none { it.clip == 20 })
+        assertDelivered(store, coin, 21, next)
+        assertEquals("STATUS after the discard shows the new pending count", 1, statuses[1].pending)
+    }
+
+    @Test
+    fun utcOffsetFollowsHelloEverySession() = runTest {
+        val store = MemoryClips(tmp.root)
+        val coin = FakeCoin(backgroundScope)
+
+        engine(store).runSession(coin)
+        assertEquals(CtrlMessage.Hello::class, coin.fromApp[0]::class)
+        assertEquals(CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, -300), coin.fromApp[1])
+        assertEquals(-300, coin.settings[CfgKey.UTC_OFFSET_MIN])
+
+        // The next session, in July: daylight saving time, UTC-4.
+        val july = 1_783_000_000_000L // 2026-07-02
+        coin.fromApp.clear()
+        engine(store, clock = { july }).runSession(coin)
+        assertEquals(CtrlMessage.Hello(july), coin.fromApp[0])
+        assertEquals(CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, -240), coin.fromApp[1])
+        assertEquals(-240, coin.settings[CfgKey.UTC_OFFSET_MIN])
     }
 
     @Test
@@ -284,7 +334,7 @@ class SyncEngineTest {
 
         assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
         assertDelivered(store, coin, 3, clip)
-        assertEquals(listOf(87, 50), statuses.map { it.batteryPct })
+        assertEquals(listOf(87, 50, 87), statuses.map { it.batteryPct }) // HELLO, unsolicited, ACK
         assertTrue(logs.any { "unknown message type 0xa0" in it })
     }
 
@@ -303,9 +353,11 @@ class SyncEngineTest {
 
         coin.reconnect()
         val getsBefore = coin.gets.size
+        val started = testScheduler.currentTime
         engine(store).runSession(coin)
 
         assertEquals("no second download", getsBefore, coin.gets.size)
+        assertTrue("the STATUS answering the re-ACK ends the session at once", testScheduler.currentTime - started < 1000)
         assertDelivered(store, coin, 8, clip)
     }
 
@@ -337,7 +389,9 @@ class SyncEngineTest {
         val result = engine(store).runSession(coin)
 
         assertEquals(SessionResult.Outcome.COMPLETE, result.outcome)
-        assertEquals(null, result.status)
+        // No STATUS after HELLO; the only one answers the ACK.
+        assertEquals(0, statuses.single().pending)
+        assertEquals(statuses.single(), result.status)
         assertDelivered(store, coin, 1, clip)
     }
 }

@@ -2,13 +2,17 @@ package dev.coinai.ble
 
 import android.app.Service
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import dev.coinai.app.CoinaiApp
 import dev.coinai.app.Notifications
 import dev.coinai.clips.CoinReply
+import dev.coinai.sync.CoinClock
+import dev.coinai.sync.LinkException
 import dev.coinai.sync.ReplyWindow
 import dev.coinai.sync.SessionResult
 import kotlinx.coroutines.CoroutineStart
@@ -23,11 +27,14 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import no.nordicsemi.android.ble.ktx.suspend
+import java.util.TimeZone
 
 /**
  * Foreground service (type connectedDevice) for one coin visit (PLAN.md D12): connect, run a
  * [dev.coinai.sync.SyncEngine] session, hold the link through the reply window forwarding
- * `REPLY`s (PROTOCOL.md rule 7), disconnect, stop. Started by [CoinPresenceService].
+ * `REPLY`s (PROTOCOL.md rule 7), disconnect, stop. Started by [CoinPresenceService]. A time zone
+ * change during the visit is sent to the coin at once (rule 8); the engine sends the offset at the
+ * start of every session anyway.
  *
  * Compiles; not yet run (no firmware BLE side, no phone in this task).
  */
@@ -80,8 +87,25 @@ class SyncService : Service() {
         val collector = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             app.replyBus.replies.filter { it.device == address }.collect { replies.send(it) }
         }
+        // Context-registered for the visit only; a system broadcast, so no export flag.
+        val zoneChanges = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val zone = intent.getStringExtra(Intent.EXTRA_TIMEZONE)?.let(TimeZone::getTimeZone) ?: TimeZone.getDefault()
+                val message = CoinClock.offsetMessage(System.currentTimeMillis(), zone) ?: return
+                scope.launch {
+                    try {
+                        link.send(message)
+                    } catch (e: LinkException) {
+                        app.log("UTC offset to $address failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        var registered = false
         try {
             link.connectTo(adapter.getRemoteDevice(address))
+            registerReceiver(zoneChanges, IntentFilter(Intent.ACTION_TIMEZONE_CHANGED))
+            registered = true
             val result = app.syncEngine().runSession(link)
             app.log("session with $address: ${result.outcome}, received ${result.received.size}, acked ${result.acked}")
             if (result.outcome == SessionResult.Outcome.COMPLETE && result.received.isNotEmpty()) {
@@ -89,6 +113,7 @@ class SyncService : Service() {
             }
         } finally {
             collector.cancel()
+            if (registered) unregisterReceiver(zoneChanges)
             withContext(NonCancellable) {
                 runCatching { link.disconnect().suspend() }
                 link.close()

@@ -16,12 +16,13 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * PROTOCOL.md rule 7: after the last ACK the coin stays connected for `reply_wait_s` and shows
  * `REPLY` progress. [hold] forwards [replies] for [clips] to the link as `REPLY` messages, with
- * the final text made plain and cut to the wire limit, until every clip has a `done` or `failed`
- * reply, the window closes, or the link drops.
+ * the text (the transcript while `thinking`, the answer when final) made plain for the coin's
+ * character set and cut to the wire limit, until every clip has a `done` or `failed` reply, the
+ * window closes, or the link drops.
  *
- * PROTOCOL-Q: the coin counts the window from its last ACK, the app from the end of the session,
- * so the app can hold on slightly past the coin. The app never sends CFG_SET, so the window is
- * the default 45 s.
+ * The coin times its window from its last ACK and goes to Standby when it closes, which drops the
+ * link and ends [hold]; [window] (from the end of the session) is the app's backstop. The app does
+ * not set `reply_wait_s`, so the coin uses its stored value, 45 s unless something else set it.
  */
 class ReplyWindow(
     private val window: Duration = DEFAULT,
@@ -40,7 +41,7 @@ class ReplyWindow(
                 } ?: break
                 if (reply.device != link.deviceAddress || reply.clipId !in clips) continue
                 val final = reply.state == ReplyState.DONE || reply.state == ReplyState.FAILED
-                val text = if (final) PlainText.forCoin(reply.text) else ""
+                val text = PlainText.forCoin(reply.text)
                 try {
                     link.send(CtrlMessage.Reply.truncating(reply.clipId, reply.state, text))
                     if (final) delivered += reply.clipId

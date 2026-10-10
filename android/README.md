@@ -7,8 +7,8 @@ Kotlin + Jetpack Compose app that receives clips from the coin over BLE and forw
 | Package | Android? | What |
 |---|---|---|
 | `dev.coinai.protocol` | no | Codec for PROTOCOL.md v1 (every `ctrl` TLV message, `data` packets). Unknown TLV types decode to `CtrlMessage.Unknown`. |
-| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY` while the coin waits). |
-| `dev.coinai.clips` | no | `ClipProcessor` (transcribe, voiced/blank gate, at-most-once prompt, reply), clip states, `PlainText` (markdown removal, coin font folding). |
+| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `CFG_SET utc_offset_min`, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`; a clip the coin discards mid-stream is dropped), `CoinClock` (rule 8: the phone's UTC offset), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY`, the transcript while `thinking`, while the coin waits). |
+| `dev.coinai.clips` | no | `ClipProcessor` (transcribe, voiced/blank gate, at-most-once prompt, reply), clip states, `PlainText` (markdown removal; folding to the coin's character set, printable ASCII and newline, with the coin's own mappings). |
 | `dev.coinai.sambot` | no | `SambotClient` (`health`, `transcribe`, `ask`) after SamBot's reference client. |
 | `dev.coinai.data` | yes | Room 3 clip table, `ClipRepository` (implements `ClipStore` and `ProcessingStore`; audio in `filesDir/clips/<device>/`). |
 | `dev.coinai.settings` | yes | DataStore settings; the SamBot token as AES-256-GCM ciphertext + IV, key in the Android Keystore (`KeystoreSecretBox`). A plain token from the first version is encrypted on first read. |
@@ -17,7 +17,9 @@ Kotlin + Jetpack Compose app that receives clips from the coin over BLE and forw
 
 Clip states: `RECEIVING → RECEIVED → TRANSCRIBED → PROMPTED → REPLIED`, side exits `NO_SPEECH`, `UNCERTAIN`, `FAILED`. A clip is prompted at most once: `TRANSCRIBED → PROMPTED` commits before `POST /prompt`, and a prompt whose outcome is unknown becomes `UNCERTAIN` and is only sent again by the user ("Resend").
 
-Open protocol questions are marked `// PROTOCOL-Q:` in the code.
+Open protocol questions are marked `// PROTOCOL-Q:` in the code; there are none at present.
+
+`SyncService` sends `utc_offset_min` again when the time zone changes during a visit (a context-registered `ACTION_TIMEZONE_CHANGED` receiver); between visits the change reaches the coin with the next session's `HELLO`.
 
 ### Not run yet
 

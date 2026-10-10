@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import java.util.TimeZone
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -57,9 +58,11 @@ data class SessionResult(
 }
 
 /**
- * Runs PROTOCOL.md sessions against a [CoinLink]: `HELLO` → `STATUS`, `LIST` → `LIST_RESULT`
- * (possibly several messages), then for each clip not yet received a `GET` from the stored resume
- * offset, reassembly, size and CRC-32 check, a durable commit, and only then `ACK`.
+ * Runs PROTOCOL.md sessions against a [CoinLink]: `HELLO` → `STATUS`, `CFG_SET utc_offset_min`
+ * (rule 8), `LIST` → `LIST_RESULT` (possibly several messages), then for each clip not yet received
+ * a `GET` from the stored resume offset, reassembly, size and CRC-32 check, a durable commit, and
+ * only then `ACK`. A clip the coin no longer has (`ERROR` 1, for example discarded while it
+ * streams) is dropped without a trace.
  */
 class SyncEngine(
     private val store: ClipStore,
@@ -68,6 +71,8 @@ class SyncEngine(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Where file I/O runs; tests pass their own dispatcher. */
     private val io: CoroutineContext = Dispatchers.IO,
+    /** The phone's time zone, read at the start of each session (PROTOCOL.md rule 8). */
+    private val timeZone: () -> TimeZone = TimeZone::getDefault,
 ) {
     suspend fun runSession(link: CoinLink): SessionResult = coroutineScope {
         val inbox = Channel<Event>(Channel.UNLIMITED)
@@ -105,18 +110,24 @@ class SyncEngine(
         /** Clips re-ACKed from the store this session, and those the coin then refused. */
         private val reAcked = mutableSetOf<Int>()
         private val fetchAsNew = mutableSetOf<Int>()
+        /** Clips the coin no longer has (`ERROR` 1 on `GET`): dropped, not unfinished. */
+        private val gone = mutableSetOf<Int>()
+        /** ACKs sent whose answer (`STATUS`, or `ERROR` when refused) has not arrived yet. */
+        private var unansweredAcks = 0
         private var current: Transfer? = null
 
         suspend fun run(): SessionResult {
             val outcome = try {
                 send(CtrlMessage.Hello(phoneUtcMs = clock()))
+                sendUtcOffset()
                 awaitStatus()
                 for (entry in list()) enqueue(entry.clip)
                 while (queue.isNotEmpty()) {
                     visit(queue.removeFirst())
-                    // PROTOCOL-Q: ACK has no success reply. Only a refused re-ACK (ERROR) is
-                    // answered, so after re-ACKs wait briefly for one before ending the session.
-                    if (queue.isEmpty() && reAcked.isNotEmpty()) settle()
+                    // Before ending the session, wait for the ACKs' answers: a refused re-ACK
+                    // makes the clip a new fetch (see aside()), and the STATUS answering the last
+                    // ACK carries the pending count the app shows.
+                    if (queue.isEmpty()) settle()
                 }
                 SessionResult.Outcome.COMPLETE to null
             } catch (_: LinkLost) {
@@ -131,7 +142,7 @@ class SyncEngine(
                 current = null
             }
             outcome.second?.let { log("session ended: $it") }
-            val unfinished = (queue + visited).filter { it !in acked }.distinct()
+            val unfinished = (queue + visited).filter { it !in acked && it !in gone }.distinct()
             return SessionResult(outcome.first, status, received.toList(), acked.toList(), unfinished, outcome.second)
         }
 
@@ -151,12 +162,28 @@ class SyncEngine(
             }
         }
 
+        /**
+         * PROTOCOL.md rule 8: the offset follows `HELLO` in every session, so a time zone change
+         * since the last visit reaches the coin. No answer unless the value is refused.
+         */
+        private suspend fun sendUtcOffset() {
+            val zone = timeZone()
+            val message = CoinClock.offsetMessage(clock(), zone)
+            if (message == null) log("UTC offset of ${zone.id} is outside the protocol's range; not sent")
+            else send(message)
+        }
+
+        private suspend fun ack(clip: Int, crc32: Long) {
+            send(CtrlMessage.Ack(clip, crc32))
+            unansweredAcks++
+        }
+
         private suspend fun awaitStatus() {
             val deadline = clock() + config.responseTimeout.inWholeMilliseconds
             while (true) {
                 val left = (deadline - clock()).milliseconds
-                // PROTOCOL-Q: HELLO without a STATUS answer. The session goes on without status
-                // rather than failing: the clip transfer does not depend on it.
+                // HELLO is answered with STATUS. A missing one is a fault, but the clip transfer
+                // does not depend on it, so the session goes on without status.
                 val inbound = if (left.isPositive()) next(left) else null
                 if (inbound == null) {
                     log("no STATUS after HELLO")
@@ -200,9 +227,14 @@ class SyncEngine(
             if (clip !in visited && clip !in queue) queue.addLast(clip)
         }
 
+        /**
+         * Waits until every ACK is answered: a matching one with `STATUS`, a refused one with
+         * `ERROR`. An unsolicited `STATUS` counts too and can end the wait early; a refusal
+         * missed that way is seen again in the next session.
+         */
         private suspend fun settle() {
             val deadline = clock() + config.responseTimeout.inWholeMilliseconds
-            while (queue.isEmpty()) {
+            while (queue.isEmpty() && unansweredAcks > 0) {
                 val left = (deadline - clock()).milliseconds
                 if (!left.isPositive()) return
                 aside(next(left) ?: return)
@@ -216,10 +248,10 @@ class SyncEngine(
             val known = store.latest(device, clip)
             if (known != null && known.received && known.crc32 != null && clip !in fetchAsNew) {
                 // Received before, but the coin still has it: the ACK was lost. Re-ACK the stored CRC.
-                // PROTOCOL-Q: clip ids wrap after 65535, so a received id could in theory be a new
-                // clip. The coin deletes only on a matching CRC, so a wrong re-ACK cannot lose data;
-                // an ERROR(ACK) for it makes the next session fetch it as new (see aside()).
-                send(CtrlMessage.Ack(clip, known.crc32))
+                // Clip ids wrap after 65535, so a received id can be a new clip. The coin deletes
+                // only on a matching CRC and refuses any other ACK with ERROR, so a wrong re-ACK
+                // cannot lose data; the refusal makes the clip a new fetch (see aside()).
+                ack(clip, known.crc32)
                 store.markAcked(known, clock())
                 acked += clip
                 reAcked += clip
@@ -240,10 +272,9 @@ class SyncEngine(
             val t = Transfer(record, assembler)
             current = t
             val clip = record.clip
-            // PROTOCOL-Q: the protocol does not say what a GET does while another stream runs.
-            // The engine assumes a new GET (resume, restart, next clip) replaces the running
-            // stream. Late packets of another clip are dropped; late packets of this clip carry
-            // the same bytes at the same offsets, so reassembly takes them as duplicates or data.
+            // A new GET (resume, restart, next clip) replaces the running stream, which then gets
+            // no CLIP_ENDED. Late packets of another clip are dropped; late packets of this clip
+            // carry the same bytes at the same offsets, so reassembly takes them as duplicates or data.
             send(CtrlMessage.Get(clip, assembler.contiguous))
             while (true) {
                 val inbound = next(config.stallTimeout)
@@ -271,8 +302,8 @@ class SyncEngine(
         private suspend fun ended(t: Transfer, m: CtrlMessage.ClipEnded): Boolean {
             val a = t.assembler
             if (a.contiguous < m.size) {
-                // PROTOCOL-Q: the protocol has no retransmit request. A gap (a lost notification)
-                // is repaired with a resume GET from the first missing byte.
+                // There is no retransmit request: a gap (a lost notification) is repaired with a
+                // resume GET from the first missing byte (rule 3).
                 if (resume(t, "gap: ${a.contiguous} of ${m.size} bytes contiguous")) return false
                 giveUp(t)
                 return true
@@ -305,7 +336,7 @@ class SyncEngine(
             val clip = store.commitReceived(t.record, m, startedAtMs = started, receivedAtMs = now)
             received += clip
             listener.onClipReceived(clip)
-            send(CtrlMessage.Ack(m.clip, m.crc32))
+            ack(m.clip, m.crc32)
             store.markAcked(t.record, clock())
             acked += m.clip
             return true
@@ -314,9 +345,14 @@ class SyncEngine(
         /** Handles ERROR for the current GET; true when the transfer is over. */
         private suspend fun error(t: Transfer, m: CtrlMessage.Error): Boolean = when (m.code) {
             ErrorCode.UNKNOWN_CLIP -> {
+                // The coin no longer has the clip: the user discarded it, while it streamed or
+                // before the GET, and it has left the coin's pending count. Drop what arrived,
+                // do not retry, do not report a failure; the caller moves on to the next clip.
+                log("clip ${t.record.clip}: gone from the coin (discarded); dropping ${t.assembler.contiguous} bytes")
                 withContext(io) { t.assembler.close() }
                 current = null
-                store.markTransferFailed(t.record, "the coin no longer has this clip")
+                store.discardTransfer(t.record)
+                gone += t.record.clip
                 true
             }
             ErrorCode.BAD_OFFSET -> if (t.restartedFromZero) {
@@ -385,19 +421,19 @@ class SyncEngine(
             val msg = (inbound as? Inbound.Ctrl)?.message ?: return // data for no current transfer
             when (msg) {
                 is CtrlMessage.Status -> onStatus(msg)
-                // PROTOCOL-Q: the protocol does not say whether CLIP_STARTED / CLIP_ENDED arrive
-                // outside a GET stream when the user records during a session. If they do, the clip
-                // is fetched in this session.
+                // Unsolicited: a recording began during the connection. It is fetched in this
+                // session, after the clips already queued. CLIP_ENDED only ever ends a GET stream,
+                // so one arriving here (a late end of a finished transfer) is ignored below.
                 is CtrlMessage.ClipStarted -> {
                     startTimes[msg.clip] = msg.startUtcMs
                     enqueue(msg.clip)
                 }
-                is CtrlMessage.ClipEnded -> enqueue(msg.clip)
                 is CtrlMessage.Error -> {
                     log("ERROR for ${typeName(msg.requestType)}: code ${msg.code}, clip ${msg.clip}")
+                    if (msg.requestType == MessageType.ACK) unansweredAcks = (unansweredAcks - 1).coerceAtLeast(0)
                     // A refused re-ACK means the stored copy is not the clip the coin holds under
-                    // this id (the id wrapped): fetch it as a new clip.
-                    if (msg.requestType == MessageType.ACK && msg.code == ErrorCode.INVALID_VALUE && msg.clip in reAcked) {
+                    // this id (the id wrapped): fetch it as a new clip. BUSY is no refusal.
+                    if (msg.requestType == MessageType.ACK && msg.code != ErrorCode.BUSY && msg.clip in reAcked) {
                         reAcked -= msg.clip
                         acked -= msg.clip
                         if (fetchAsNew.add(msg.clip)) queue.addLast(msg.clip)
@@ -410,6 +446,7 @@ class SyncEngine(
 
         private fun onStatus(s: CtrlMessage.Status) {
             status = s
+            unansweredAcks = (unansweredAcks - 1).coerceAtLeast(0)
             listener.onStatus(device, s)
         }
 

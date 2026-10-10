@@ -68,14 +68,19 @@ enum class ReplyState(val code: Int) {
     }
 }
 
-/** `CFG_SET` keys; [width] is the byte width of the little-endian value. */
-enum class CfgKey(val code: Int, val width: Int) {
+/**
+ * `CFG_SET` keys; [width] is the byte width of the little-endian value, [signed] whether it is
+ * two's complement. [range] is what [CtrlMessage.encode] accepts: the wire range for the unsigned
+ * keys (the coin checks their documented ranges and answers `ERROR` 5), and the documented
+ * −720..840 for `utc_offset_min`, the only signed key.
+ */
+enum class CfgKey(val code: Int, val width: Int, val signed: Boolean = false, val range: IntRange = 0..(if (width == 1) 0xFF else 0xFFFF)) {
     REPLY_WAIT_S(0x01, 2),
     BRIGHTNESS(0x02, 1),
     IDLE_TIMEOUT_S(0x03, 2),
-    OFF_AFTER_H(0x04, 2);
-
-    val maxValue: Int get() = if (width == 1) 0xFF else 0xFFFF
+    OFF_AFTER_H(0x04, 2),
+    /** Local time minus UTC in minutes (PROTOCOL.md rule 8); i16 on the wire. */
+    UTC_OFFSET_MIN(0x05, 2, signed = true, range = -720..840);
 
     companion object {
         fun fromCode(code: Int): CfgKey =
@@ -184,9 +189,9 @@ sealed class CtrlMessage {
                 v.shortString(password, Protocol.MAX_PASSWORD_BYTES, "password")
             }
             is CfgSet -> {
-                require(value in 0..key.maxValue) { "$key value $value out of range" }
+                require(value in key.range) { "$key value $value out of range ${key.range}" }
                 v.u8(key.code)
-                if (key.width == 1) v.u8(value) else v.u16(value)
+                if (key.width == 1) v.u8(value) else v.u16(value and 0xFFFF)
             }
             is Reply -> { v.u16(clip); v.u8(state.code); v.restString(text, Protocol.MAX_REPLY_TEXT_BYTES, "text") }
             is Status -> {
@@ -230,7 +235,8 @@ sealed class CtrlMessage {
                 MessageType.WIFI_SET -> WifiSet(r.shortString(), r.shortString())
                 MessageType.CFG_SET -> {
                     val key = CfgKey.fromCode(r.u8())
-                    CfgSet(key, if (key.width == 1) r.u8() else r.u16())
+                    val raw = if (key.width == 1) r.u8() else r.u16()
+                    CfgSet(key, if (key.signed) raw.toShort().toInt() else raw)
                 }
                 MessageType.REPLY -> Reply(r.u16(), ReplyState.fromCode(r.u8()), r.restString())
                 MessageType.STATUS -> {

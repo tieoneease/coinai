@@ -74,9 +74,9 @@ class ClipRepository(
 
     override suspend fun markAcked(record: TransferRecord, atMs: Long) = dao.markAcked(record.rowId, atMs)
 
-    override suspend fun markTransferFailed(record: TransferRecord, reason: String) {
+    override suspend fun discardTransfer(record: TransferRecord) {
         record.partFile.delete()
-        dao.setState(record.rowId, ClipState.FAILED, reason)
+        dao.deleteReceiving(record.rowId)
     }
 
     // ProcessingStore

@@ -1,5 +1,6 @@
 package dev.coinai.testing
 
+import dev.coinai.protocol.CfgKey
 import dev.coinai.protocol.ClipEntry
 import dev.coinai.protocol.CtrlMessage
 import dev.coinai.protocol.DataPacket
@@ -27,7 +28,8 @@ import kotlin.time.Duration.Companion.milliseconds
  * The device side of PROTOCOL.md v1, in memory: answers HELLO with STATUS, LIST with LIST_RESULT
  * (split at [listChunk] entries), streams `data` packets for GET from the requested offset (also
  * while a clip is still recording) and ends with CLIP_ENDED, deletes a clip only on an ACK whose
- * CRC matches. Every message crosses the real codec in both directions.
+ * CRC matches and answers it with STATUS, stores CFG_SET values. Every message crosses the real
+ * codec in both directions.
  *
  * Fault knobs model what the radio and Android can do to a transfer.
  */
@@ -52,6 +54,9 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     val gets: List<CtrlMessage.Get> get() = fromApp.filterIsInstance<CtrlMessage.Get>()
     val acks: List<CtrlMessage.Ack> get() = fromApp.filterIsInstance<CtrlMessage.Ack>()
 
+    /** Settings from CFG_SET, as the coin stores them. */
+    val settings = mutableMapOf<CfgKey, Int>()
+
     var listChunk = Protocol.MAX_LIST_ENTRIES
     var answerHello = true
     var packetInterval: Duration = 5.milliseconds
@@ -74,6 +79,11 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     var vanishOnGet: Set<Int> = emptySet()
     /** Drop the link when an ACK arrives, before acting on it (the app sees a failed write). */
     var disconnectOnAck = false
+    /**
+     * The user discards clip `key` after `value` packets of its stream: the coin deletes it, stops
+     * with ERROR 1 instead of CLIP_ENDED and sends STATUS with the new pending count.
+     */
+    var discardWhileStreaming: Map<Int, Int> = emptyMap()
     /** Extra ctrl messages sent right after the first data packet of each stream. */
     var injectDuringStream: List<CtrlMessage> = emptyList()
 
@@ -99,9 +109,8 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
         val m = CtrlMessage.decode(message.encode())
         fromApp += m
         when (m) {
-            is CtrlMessage.Hello -> if (answerHello) emit(
-                CtrlMessage.Status(87, charging = false, usbPower = false, recording = clips.values.any { !it.complete }, pending = clips.size, fwVersion = "0.1.0"),
-            )
+            is CtrlMessage.Hello -> if (answerHello) emitStatus()
+            is CtrlMessage.CfgSet -> settings[m.key] = m.value
             CtrlMessage.ListClips -> {
                 val entries = clips.values.map { ClipEntry(it.id, it.size, it.complete) }
                 val chunks = entries.chunked(listChunk).ifEmpty { listOf(emptyList()) }
@@ -117,13 +126,20 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
                 val clip = clips[m.clip]
                 when {
                     clip == null -> emit(CtrlMessage.Error(MessageType.ACK, ErrorCode.UNKNOWN_CLIP, m.clip))
-                    clip.crc() == m.crc32 -> clips.remove(m.clip)
+                    clip.crc() == m.crc32 -> {
+                        clips.remove(m.clip)
+                        emitStatus()
+                    }
                     else -> emit(CtrlMessage.Error(MessageType.ACK, ErrorCode.INVALID_VALUE, m.clip))
                 }
             }
             else -> Unit
         }
     }
+
+    private fun emitStatus() = emit(
+        CtrlMessage.Status(87, charging = false, usbPower = false, recording = clips.values.any { !it.complete }, pending = clips.size, fwVersion = "0.1.0"),
+    )
 
     fun emit(message: CtrlMessage) {
         toApp += message
@@ -158,6 +174,12 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
                     pos += len
                     val i = index++
                     if (n == 0 && stallAfterPackets == i) return@launch
+                    if (discardWhileStreaming[clip.id] == i) {
+                        clips.remove(clip.id)
+                        emit(CtrlMessage.Error(MessageType.GET, ErrorCode.UNKNOWN_CLIP, clip.id))
+                        emitStatus()
+                        return@launch
+                    }
                     packetsThisConnection++
                     if (disconnectAfterPackets != null && packetsThisConnection > disconnectAfterPackets!!) {
                         disconnectAfterPackets = null

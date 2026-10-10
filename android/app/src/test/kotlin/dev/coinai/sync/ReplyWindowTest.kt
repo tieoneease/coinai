@@ -43,6 +43,24 @@ class ReplyWindowTest {
     }
 
     @Test
+    fun thinkingCarriesTheCleanedTranscript() = runTest {
+        val coin = FakeCoin(backgroundScope)
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        // Folded to the coin's character set (\u2019 \u2192 ', \u00E9 \u2192 e, emoji and CJK dropped), then cut to 200 bytes.
+        val transcript = "what\u2019s the caf\u00E9 \uD83D\uDE00 called " + "\u65E5".repeat(10) + "y".repeat(300)
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.THINKING, transcript))
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "ok"))
+
+        ReplyWindow().hold(coin, setOf(5), ch)
+
+        val thinking = replies(coin).first()
+        assertEquals(ReplyState.THINKING, thinking.state)
+        assertTrue(thinking.text, thinking.text.startsWith("what's the cafe called yyy"))
+        assertEquals(Protocol.MAX_REPLY_TEXT_BYTES, thinking.text.toByteArray().size)
+        assertTrue(thinking.text.all { it in ' '..'~' })
+    }
+
+    @Test
     fun windowClosesAfterTheDefault() = runTest {
         val coin = FakeCoin(backgroundScope)
         val ch = Channel<CoinReply>(Channel.UNLIMITED)

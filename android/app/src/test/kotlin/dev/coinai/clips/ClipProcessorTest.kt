@@ -127,6 +127,7 @@ class ClipProcessorTest {
         assertEquals(listOf(clip.id to "**Done.** The lights are on."), notified.toList())
         assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), coin.map { it.state })
         assertEquals(7, coin.last().clipId)
+        assertEquals("thinking shows what SamBot heard", "turn on the lights", coin[1].text)
     }
 
     @Test

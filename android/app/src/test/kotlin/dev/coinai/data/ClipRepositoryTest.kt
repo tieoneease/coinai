@@ -54,6 +54,23 @@ class ClipRepositoryTest {
     }
 
     @Test
+    fun discardedTransferLeavesNoRowOrFile() = runBlocking {
+        val kept = received(clip = 7)
+        val t = repo.beginTransfer("AA:BB", 7) // a new recording under a wrapped id
+        t.partFile.writeBytes(ByteArray(500))
+        repo.saveProgress(t, 500)
+
+        repo.discardTransfer(t)
+
+        assertFalse(t.partFile.exists())
+        assertNull(repo.get(t.rowId))
+        assertEquals("the received row is untouched", ClipState.RECEIVED, repo.get(kept)!!.state)
+        // Only an unfinished row is ever deleted.
+        repo.discardTransfer(repo.latest("AA:BB", 7)!!)
+        assertEquals(ClipState.RECEIVED, repo.get(kept)!!.state)
+    }
+
+    @Test
     fun transferResumesThenCommitsAndMovesTheFile() = runBlocking {
         val first = repo.beginTransfer("AA:BB", 7)
         repo.saveProgress(first, 4096)

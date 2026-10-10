@@ -58,9 +58,9 @@ class MemoryClips(private val root: File) : ClipStore, ProcessingStore {
         rows[record.rowId] = rows.getValue(record.rowId).copy(ackedAtMs = atMs)
     }
 
-    override suspend fun markTransferFailed(record: TransferRecord, reason: String) {
+    override suspend fun discardTransfer(record: TransferRecord) {
         record.partFile.delete()
-        rows[record.rowId] = rows.getValue(record.rowId).copy(state = ClipState.FAILED, error = reason)
+        rows.computeIfPresent(record.rowId) { _, r -> r.takeIf { it.state != ClipState.RECEIVING } }
     }
 
     override suspend fun get(id: Long) = rows[id]

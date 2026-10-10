@@ -55,12 +55,32 @@ class CtrlCodecTest {
             { CtrlMessage.Ack(1, 0x1_0000_0000L) },
             { CtrlMessage.Ack(-1, 0) },
             { CtrlMessage.CfgSet(CfgKey.BRIGHTNESS, 256) },
+            { CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, -721) },
+            { CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, 841) },
+            { CtrlMessage.CfgSet(CfgKey.REPLY_WAIT_S, -1) },
             { CtrlMessage.ListResult(false, List(35) { ClipEntry(it, 1, true) }) },
             { CtrlMessage.Status(87, false, false, false, 0, "v".repeat(33)) },
         )
         for (make in bad) {
             val msg = make()
             assertThrows("encode $msg", IllegalArgumentException::class.java) { msg.encode() }
+        }
+    }
+
+    @Test
+    fun utcOffsetIsI16TwosComplement() {
+        val cases = mapOf(
+            -300 to "06030005d4fe", // UTC-5, PROTOCOL.md's example
+            -720 to "0603000530fd", // lower bound
+            840 to "060300054803", // upper bound
+            0 to "060300050000",
+            330 to "060300054a01", // India
+            -1 to "06030005ffff",
+        )
+        for ((minutes, hex) in cases) {
+            val msg = CtrlMessage.CfgSet(CfgKey.UTC_OFFSET_MIN, minutes)
+            assertEquals("encode $minutes", hex, msg.encode().toHex())
+            assertEquals("decode $hex", msg, CtrlMessage.decode(hex.hexToBytes()))
         }
     }
 
