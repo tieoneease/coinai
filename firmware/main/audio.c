@@ -211,7 +211,7 @@ static void finish_clip(bool discard)
     fclose(s_file);
     s_file = NULL;
     if (discard) {
-        clipstore_remove(s_clip_id);
+        clipstore_discard(s_clip_id);  // a phone streaming it gets ERROR 1 (ble.c)
         ESP_LOGI(TAG, "clip %u discarded", s_clip_id);
     } else {
         res.size = s_ogg.bytes;

@@ -56,6 +56,8 @@ static int cmp_clip(const void *a, const void *b)
     return (int)((const clip_info_t *)a)->id - (int)((const clip_info_t *)b)->id;
 }
 
+static volatile uint16_t s_discarded;  // a discarded clip whose file could not be removed yet
+
 int clipstore_list(clip_info_t *out, int max)
 {
     DIR *dir = opendir(BASE);
@@ -67,7 +69,8 @@ int clipstore_list(clip_info_t *out, int max)
     while ((e = readdir(dir)) != NULL && n < max) {
         unsigned id;
         char ext[8];
-        if (sscanf(e->d_name, "%5u.%7s", &id, ext) != 2 || strcmp(ext, "ogg") != 0 || id == 0 || id > 65535) {
+        if (sscanf(e->d_name, "%5u.%7s", &id, ext) != 2 || strcmp(ext, "ogg") != 0 || id == 0 || id > 65535 ||
+            id == s_discarded) {
             continue;
         }
         if (out) {
@@ -102,7 +105,24 @@ esp_err_t clipstore_remove(uint16_t id)
     meta_path(id, path, sizeof path);
     remove(path);
     clipstore_path(id, path, sizeof path);
-    return remove(path) == 0 ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (remove(path) != 0) {
+        return ESP_ERR_NOT_FOUND;  // or still open (LittleFS refuses with EBUSY)
+    }
+    if (id == s_discarded) {
+        s_discarded = 0;
+    }
+    return ESP_OK;
+}
+
+void clipstore_discard(uint16_t id)
+{
+    s_discarded = id;  // first, so a transfer cannot rebuild its metadata in between
+    clipstore_remove(id);
+}
+
+bool clipstore_discarded(uint16_t id)
+{
+    return id && id == s_discarded;
 }
 
 #define META_MAGIC 0x314D4F43u  // "COM1"
@@ -195,6 +215,9 @@ static esp_err_t recompute_meta(uint16_t id, clip_meta_t *meta)
 
 esp_err_t clipstore_get_meta(uint16_t id, uint16_t recording, clip_meta_t *meta, bool *complete)
 {
+    if (clipstore_discarded(id)) {
+        return ESP_ERR_NOT_FOUND;
+    }
     char path[32];
     meta_path(id, path, sizeof path);
     FILE *f = fopen(path, "rb");

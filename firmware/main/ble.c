@@ -277,6 +277,16 @@ static bool tx_step(void)
     if (!s_tx.active || (!console && (conn == LINK_CONN_NONE || !s_data_sub))) {
         return false;
     }
+    if (clipstore_discarded(s_tx.clip)) {
+        // Discarded while streaming: stop with ERROR 1, then delete it now that our handle is closed.
+        uint16_t clip = s_tx.clip;
+        tx_stop();
+        clipstore_remove(clip);
+        send_error(MSG_GET, ERR_UNKNOWN_CLIP, clip);
+        refresh_pending();
+        send_status();
+        return false;
+    }
     if (!s_tx.complete && audio_recording_clip() != s_tx.clip) {
         // Recording ended since the GET: pick up the final size and CRC.
         bool complete;

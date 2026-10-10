@@ -30,6 +30,10 @@ void clipstore_path(uint16_t id, char *buf, size_t len);
 int clipstore_list(clip_info_t *out, int max);  // ascending ids; returns the count
 int clipstore_count(void);
 esp_err_t clipstore_remove(uint16_t id);
+// A clip the user discarded. Its file may still be open by a transfer, so it can outlive the call;
+// until then it is hidden from listings and metadata, and clipstore_discarded() names it.
+void clipstore_discard(uint16_t id);
+bool clipstore_discarded(uint16_t id);
 esp_err_t clipstore_usage(size_t *total, size_t *used);
 esp_err_t clipstore_put_meta(uint16_t id, const clip_meta_t *meta);
 void clipstore_drop_meta(uint16_t id);  // test hook: makes the clip look cut off

@@ -67,7 +67,7 @@ def wifi_set(ssid: bytes, password: bytes) -> bytes:
 
 def cfg_set(key: int, value: int) -> bytes:
     fmt = '<B' if key == 2 else '<H'
-    return tlv(CFG_SET, bytes([key]) + struct.pack(fmt, value))
+    return tlv(CFG_SET, bytes([key]) + struct.pack(fmt, value & 0xFFFF))  # key 5 is signed
 
 
 def reply(clip: int, state: int, text: str) -> bytes:

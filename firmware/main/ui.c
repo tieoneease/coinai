@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "eyes.h"
+#include "input.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -93,13 +94,14 @@ static ui_mode_t s_mode = M_BOOT;
 static volatile int s_bye_req = -1;
 static volatile bool s_bye_done = true;
 static bool s_drowsy, s_drowsy_shown;
+static bool s_drowsy_done;  // this idle period's drowsy flow has started
 
 // ---------- items: UI objects that fade and slide on springs ----------
 
 // Long text is one label per line, so lines fade in one after another (60 ms apart) and only a line
 // or two re-render per frame: a whole 340 px reply fading at once costs 15-20 ms a frame on the coin.
-#define HEARD_LINES 7
-#define BODY_LINES 9
+#define HEARD_LINES 9   // 190 px at F16 (20 px a line), the smallest fit_font font
+#define BODY_LINES 12   // 240 px at F16
 
 enum {
     IT_STATUS, IT_CHIP, IT_CHIP_H, IT_TIMER, IT_HINT, IT_CAP, IT_BODY, IT_SUB, IT_PASS,
@@ -315,10 +317,14 @@ static void ascii_text(char *dst, size_t n, const char *src)
         uint32_t cp = 0;
         int len = (*s >= 0xF0) ? 4 : (*s >= 0xE0) ? 3 : (*s >= 0xC0) ? 2 : 1;
         cp = *s & (len == 4 ? 0x07 : len == 3 ? 0x0F : 0x1F);
-        for (int i = 1; i < len && s[i]; i++) {
+        int i = 1;
+        for (; i < len && s[i]; i++) {
             cp = (cp << 6) | (s[i] & 0x3F);
         }
-        s += len;
+        s += i;  // never past the terminator of a cut-off sequence
+        if (i < len) {
+            break;
+        }
         const char *rep = "";
         switch (cp) {
         case 0x2018: case 0x2019: case 0x2032: rep = "'"; break;
@@ -661,6 +667,8 @@ static const char *s_flow_name = "";
 #define FLOW(f) flow_start(f, #f)
 
 static float f_bye(int k);
+static float f_drowsy(int k);
+static float f_unsleep(int k);
 static float f_collapse(int k);
 static float f_wake(int k);
 static float f_power_on(int k);
@@ -669,6 +677,10 @@ static float f_wait_rec(int k);
 static void flow_start(flow_fn f, const char *name)
 {
     // A goodbye leaves the eyes faded out; anything but the goodbyes and wakes brings them back.
+    if (s_drowsy_shown && f != f_bye && f != f_unsleep && f != f_drowsy) {
+        s_drowsy_shown = false;  // something else took over from drowsy: its z's go
+        eyes_zzz(false);
+    }
     bool from_off = s_mode == M_OFF || s_mode == M_BYE;
     if (from_off && f != f_bye && f != f_collapse && f != f_wake && f != f_power_on && f != f_wait_rec) {
         eyes_visible_to(1, M_UI);
@@ -1896,7 +1908,7 @@ static void handle_event(const ui_msg_t *m)
         }
         break;
     case UI_EV_COMBO_CANCEL:
-        if (s_mode == M_POWERHOLD) {
+        if (s_mode == M_POWERHOLD || s_flow == f_powerhold) {
             eyes_blink(1, 1);
             go_face();
         }
@@ -2131,7 +2143,11 @@ static void react(void)
     }
 
     // Drowsy: the idle timeout is near.
-    if (s_drowsy && !s_drowsy_shown && (s_mode == M_FACE || is_content(s_mode))) {
+    if (!s_drowsy) {
+        s_drowsy_done = false;
+    }
+    if (s_drowsy && !s_drowsy_done && !s_drowsy_shown && (s_mode == M_FACE || is_content(s_mode))) {
+        s_drowsy_done = true;
         FLOW(f_drowsy);
     } else if (!s_drowsy && s_drowsy_shown && s_mode == M_DROWSY) {
         FLOW(f_unsleep);
@@ -2454,6 +2470,14 @@ static void tick_cb(lv_timer_t *t)
     react();
     if (s_mode == M_POWERHOLD) {
         squeeze_progress(s_now - s_t0, 3.0f);
+        // app_main cancels when either button comes up. Should that event be missed (it can arrive
+        // in the same tick as the start), this screen must not stay up keeping the coin awake.
+        bool pwr, boot;
+        input_get(&pwr, &boot);
+        if (!s_demo && (!pwr || !boot) && s_now - s_t0 > 0.1f) {
+            eyes_blink(1, 1);
+            go_face();
+        }
     }
     flow_run();
     eyes_step(dt);
