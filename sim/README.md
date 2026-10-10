@@ -3,7 +3,7 @@
 The coin and the app, both running on this PC, talking to each other over virtual Bluetooth:
 
 ```
- browser UI (127.0.0.1:8740)          Android emulator (the real app)
+ browser UI (coinsim.localhost)      Android emulator (the real app)
    buttons, touch, joystick,                     │  Bluetooth: netsim
    battery, mic, speaker                         │
             │                                    │
@@ -31,17 +31,21 @@ Rebuild after changing firmware code. Windows locks a running exe: power the sim
 
 ## Run
 
+The page is served through [portless](https://github.com/vercel-labs/portless) at **https://coinsim.localhost/**: a stable name instead of a port, and HTTPS, which the browser microphone needs on any name but `localhost`. portless 0.15.7 is installed globally (`npm i -g portless`, Node ≥ 24). Its proxy holds port 443 and starts with the first `portless` command; its local CA is in the Windows trust store (`portless trust`, done once; `portless doctor` checks it all). `coinsim.py` listens on the `PORT` portless assigns. Without portless it falls back to `--http-port`, default 8740, at http://127.0.0.1:8740/.
+
+Only the web page goes through portless. The Bluetooth links (vlink's HCI ports 9101/9102, netsim's gRPC) and the coin's IPC socket are raw TCP and stay on their ports.
+
 ```bash
 PY=/c/Users/Tanker/tools/coinsim-venv/Scripts/python.exe
 
 # Without the emulator: two Bumble controllers on a virtual link, and a scripted phone
 $PY sim/host/tools/vlink.py
-$PY sim/host/coinsim.py --ble tcp-client:127.0.0.1:9101 --power-on      # then open http://127.0.0.1:8740/
-$PY sim/host/tools/central.py --passkey-from http://127.0.0.1:8740/api/state --keys /tmp/phone.json hello list "get 1 0"
+portless coinsim $PY sim/host/coinsim.py --ble tcp-client:127.0.0.1:9101 --power-on   # then open https://coinsim.localhost/
+$PY sim/host/tools/central.py --passkey-from https://coinsim.localhost/api/state --keys /tmp/phone.json hello list "get 1 0"
 
 # With the Android emulator: the coin on the emulator's Bluetooth (netsim, which the emulator starts)
 $SDK/emulator/emulator.exe -avd coinai_api36
-$PY sim/host/coinsim.py --power-on
+portless coinsim $PY sim/host/coinsim.py --power-on
 cd android && ./gradlew installDebug
 ```
 

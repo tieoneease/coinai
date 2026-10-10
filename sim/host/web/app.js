@@ -229,7 +229,7 @@ async function startBrowserMic() {
     const mute = a.createGain(); mute.gain.value = 0; micNode.connect(mute); mute.connect(a.destination);
     note.textContent = `Streaming this browser's microphone (${a.sampleRate} Hz → 16 kHz).`; show(note, true);
   } catch (err) {
-    note.textContent = 'Microphone unavailable: ' + err.message + '. Allow microphone access for 127.0.0.1 and pick the source again.';
+    note.textContent = 'Microphone unavailable: ' + err.message + '. Allow microphone access for ' + location.hostname + ' and pick the source again.';
     show(note, true);
   }
 }
@@ -457,7 +457,7 @@ function meter(id, db) {
 // ------------------------------------------------------------------ websocket
 let wsRetry = 500;
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);  // https under portless
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { wsRetry = 500; setAttr($('pill-ws'), 'data-tone', 'ok'); setText($('pill-ws-text'), 'host connected'); con.innerHTML = ''; conLines = 0; blelog.innerHTML = ''; logItems.clear(); };
   ws.onclose = () => {

@@ -5,7 +5,7 @@ The host side of the desktop simulator for the coin. It implements the host end 
 - It supervises `coinsim.exe`.
 - It models the board around it: the AXP2101 PMIC, the QMI8658 IMU, the I2C bus map, the GPIOs, the mic and the speaker.
 - It bridges the coin's NimBLE-shaped `BLE_*` messages onto a real Bumble peripheral.
-- It serves the instrument-panel UI at http://127.0.0.1:8740/.
+- It serves the instrument-panel UI: at https://coinsim.localhost/ when started through [portless](https://github.com/vercel-labs/portless) (it listens on portless's `$PORT`), otherwise at http://127.0.0.1:8740/ (`--http-port`).
 
 The Python is `C:/Users/Tanker/tools/coinsim-venv` (3.13, with bumble, aiohttp, numpy, av, grpcio and pytest).
 
@@ -13,10 +13,10 @@ The Python is `C:/Users/Tanker/tools/coinsim-venv` (3.13, with bumble, aiohttp, 
 PY=/c/Users/Tanker/tools/coinsim-venv/Scripts/python.exe
 
 # The real coin (default --coin sim/coin/build/coinsim.exe) on the Android emulator's netsim radio:
-$PY sim/host/coinsim.py
+portless coinsim $PY sim/host/coinsim.py
 
 # Without the coin build: the Python stand-in (see fake_coin.py for its stdin commands)
-$PY sim/host/coinsim.py --coin sim/host/fake_coin.py --power-on
+portless coinsim $PY sim/host/coinsim.py --coin sim/host/fake_coin.py --power-on
 ```
 
 To power the coin on, hold **PWR** (Space). **BOOT** is B. Holding both for 3 s powers the coin off.
@@ -35,9 +35,9 @@ Testing with no emulator or phone:
 
 ```sh
 $PY sim/host/tools/vlink.py                                       # coin side :9101, phone side :9102
-$PY sim/host/coinsim.py --coin sim/host/fake_coin.py --ble tcp-client:127.0.0.1:9101 --power-on
+portless coinsim $PY sim/host/coinsim.py --coin sim/host/fake_coin.py --ble tcp-client:127.0.0.1:9101 --power-on
 $PY sim/host/tools/central.py --transport tcp-client:127.0.0.1:9102 \
-    --passkey-from http://127.0.0.1:8740/api/state --keys /tmp/phone_keys.json hello list "get 7 0"
+    --passkey-from https://coinsim.localhost/api/state --keys /tmp/phone_keys.json hello list "get 7 0"
 ```
 
 `central.py` behaves like the phone:
@@ -45,6 +45,8 @@ $PY sim/host/tools/central.py --transport tcp-client:127.0.0.1:9102 \
 1. Connects, sets MTU 247 and subscribes.
 2. Writes. On ATT 0x05 it pairs, typing the passkey that the coin shows (read from `/api/state`), then retries.
 3. With `--keys`, it re-encrypts with the stored bond on later runs.
+
+`--passkey-from` accepts the portless URL: `central.py` resolves `*.localhost` names to 127.0.0.1 itself (RFC 6761), because Windows' resolver does not and portless would otherwise need an admin hosts-file entry. The certificate is still checked against the real name.
 
 ## Layout
 

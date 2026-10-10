@@ -204,6 +204,13 @@ async def apply_input(sim: Sim, body: dict) -> dict:
 def make_app(sim: Sim) -> web.Application:
     hub = Hub(sim)
     app = web.Application(client_max_size=MAX_UPLOAD)
+
+    # The page's scripts change with the simulator: revalidate them (ETag) instead of running a cached copy.
+    async def no_cache_static(request, response):
+        if request.path.startswith('/static/'):
+            response.headers['Cache-Control'] = 'no-cache'
+
+    app.on_response_prepare.append(no_cache_static)
     app['hub'] = hub
 
     async def on_startup(app):

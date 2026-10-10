@@ -2,7 +2,7 @@
 (over tools/vlink.py, or netsim) and, later, the real coinsim.exe behind it.
 
     python sim/host/tools/central.py --transport tcp-client:127.0.0.1:9102 \
-        --passkey-from http://127.0.0.1:8740/api/state  hello list "get 7 0" "wait 1"
+        --passkey-from https://coinsim.localhost/api/state  hello list "get 7 0" "wait 1"
 
 Flow: scan for the coinai service UUID, connect, MTU 247, discover, subscribe (CCCDs are open before pairing),
 write; on ATT 0x05 (Insufficient Authentication) pair with LE Secure Connections + MITM + bonding as KeyboardOnly,
@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import socket
 import struct
 import sys
 import time
@@ -44,7 +45,25 @@ def say(*a) -> None:
     print(time.strftime('%H:%M:%S'), *a, flush=True)
 
 
+def resolve_localhost_names() -> None:
+    """RFC 6761: every *.localhost name is loopback. Browsers resolve portless's https://<name>.localhost themselves;
+    the Windows resolver does not (portless would have to edit the hosts file as administrator). Only the address
+    lookup changes: TLS still checks the certificate against the real name."""
+    lookup = socket.getaddrinfo
+    if getattr(lookup, 'localhost_names', False):
+        return
+
+    def getaddrinfo(host, *args, **kwargs):
+        if isinstance(host, str) and host.lower().rstrip('.').endswith('.localhost'):
+            host = '127.0.0.1'
+        return lookup(host, *args, **kwargs)
+
+    getaddrinfo.localhost_names = True
+    socket.getaddrinfo = getaddrinfo
+
+
 def fetch_passkey(url: str, timeout: float = 15.0) -> int | None:
+    resolve_localhost_names()
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         try:

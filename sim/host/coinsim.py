@@ -1,8 +1,9 @@
 """coinsim host: simulates the board around the coin's firmware and serves the browser UI.
 
-    python sim/host/coinsim.py [--coin sim/coin/build/coinsim.exe] [--http-port 8740] [--ble android-netsim]
+    portless coinsim python sim/host/coinsim.py [--coin sim/coin/build/coinsim.exe] [--ble android-netsim]
 
-Open http://127.0.0.1:8740/ and hold PWR to power the coin on. Ctrl+C stops the host and the coin.
+Open https://coinsim.localhost/ and hold PWR to power the coin on. Ctrl+C stops the host and the coin.
+Under portless the UI listens on the port portless assigns ($PORT); without it, on --http-port (default 8740).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import pathlib
 import shlex
 import signal
@@ -39,7 +41,9 @@ def parse_args(argv=None):
     ap.add_argument('--coin', default='sim/coin/build/coinsim.exe',
                     help='coin executable, a .py stand-in (e.g. sim/host/fake_coin.py) or a full command line')
     ap.add_argument('--data', default=str(REPO / 'sim' / '.data' / 'default'), help='data directory')
-    ap.add_argument('--http-port', type=int, default=8740)
+    # portless passes the app's port in PORT. HOST is not read: zsh sets it to the machine name, which would put
+    # the UI on the network; portless's own HOST is 127.0.0.1 anyway.
+    ap.add_argument('--http-port', type=int, default=int(os.environ.get('PORT') or 8740))
     ap.add_argument('--http-host', default='127.0.0.1')
     ap.add_argument('--ble', default='android-netsim',
                     help='android-netsim (default), none, or any Bumble transport moniker (e.g. tcp-client:127.0.0.1:9101)')
@@ -66,7 +70,8 @@ async def amain(args) -> None:
     site = web.TCPSite(runner, args.http_host, args.http_port)
     await sim.start()
     await site.start()
-    print(f'coinsim: http://{args.http_host}:{args.http_port}/  (IPC port {sim.port}, BLE {args.ble}, '
+    url = os.environ.get('PORTLESS_URL') or f'http://{args.http_host}:{args.http_port}'
+    print(f'coinsim: {url}/  (HTTP on {args.http_host}:{args.http_port}, IPC port {sim.port}, BLE {args.ble}, '
           f'data {sim.data_dir})', flush=True)
     if args.power_on:
         await sim.power_on('--power-on')
