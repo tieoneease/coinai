@@ -102,6 +102,6 @@ Device Information (0x180A) and Battery (0x180F, with level notifications).
    - During the window the device shows progress from `REPLY`.
    - A `REPLY` in state `done` or `failed` shows its text and starts the normal idle timeout.
    - When the window closes, the device goes to Standby. A reply that arrives later is only on the phone.
-   - The app removes markdown, and any characters the coin's font lacks, before sending.
+   - The app removes markdown, and any characters the coin's font lacks, before sending. The font covers printable ASCII (0x20–0x7E) and newline. The coin itself maps ‘ ’ ′ to `'`, “ ” ″ to `"`, … to `...`, – — − • · to `-`, no-break and thin spaces to a space, ° to ` deg` and × to `x`, and drops anything else.
    - In state `thinking` the text may carry what SamBot heard (the transcript); the coin shows it while it waits.
 8. **Local time.** The coin shows a clock only after the app has sent `utc_offset_min` (`CFG_SET` key `0x05`). The app sends it after `HELLO` and whenever the phone's time zone changes.
