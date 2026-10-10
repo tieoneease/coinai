@@ -151,6 +151,7 @@ Meanings per XPowersLib; datasheet not checked.
 **Bring-up readings:**
 - Battery 4127 mV at 100 %, charger "done" on USB (VBUS 4988 mV, VSYS 4339 mV).
 - IMU at rest |a| = 1.04 g; gyro zero-rate offset is about ±9 dps uncalibrated.
+- IMU axes as the firmware assumes them: flat and face up reads (0, 0, +1 g) (measured: 0.055, 0.015, 1.034 g). The sign of x and y relative to the screen (the UI's tilt direction) is **not yet checked**.
 - Display plus touch bring-up includes a 1.2 s stall with an `i2c.master` pull-up warning (seen with Waveshare's demo too). It matters for the phase 3 boot path.
 
 ## Audio bring-up (2026-10-09)

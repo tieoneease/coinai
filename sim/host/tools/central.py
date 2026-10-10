@@ -8,7 +8,7 @@ Flow: scan for the coinai service UUID, connect, MTU 247, discover, subscribe (C
 write; on ATT 0x05 (Insufficient Authentication) pair with LE Secure Connections + MITM + bonding as KeyboardOnly,
 typing the passkey the coin shows (--passkey, or fetched from the host's GET /api/state), then retry the write.
 
-Commands: hello | list | get CLIP [OFFSET] | ack CLIP CRC32HEX | cfg KEY VALUE | reply CLIP STATE TEXT |
+Commands: hello | list | get CLIP [OFFSET] | ack CLIP CRC32HEX|last | cfg KEY VALUE | reply CLIP STATE TEXT |
           wifi SSID PASSWORD | raw HEX | wait SECONDS | read-dis | read-battery | disconnect
 The last line of output is `RESULT {json}` with everything received.
 """
@@ -102,6 +102,7 @@ class Central:
         self.result = {'indications': [], 'notifications': 0, 'data_bytes': 0, 'data': {}, 'att_errors': [],
                        'paired': False, 'mtu': None, 'dis': {}, 'battery': None, 'adv': {}}
         self.ind_queue: asyncio.Queue = asyncio.Queue()
+        self.last_crc: int | None = None
         self.delegate = KeyboardDelegate(args)
 
     # ------------------------------------------------------------ callbacks
@@ -109,6 +110,8 @@ class Central:
         text = tlv.describe(value)
         say(f'<- ctrl {text}')
         self.result['indications'].append(text)
+        if value[:1] == bytes([tlv.CLIP_ENDED]) and len(value) >= 3 + 14:
+            self.last_crc = struct.unpack_from('<I', value, 3 + 10)[0]  # clip u16, size u32, duration u32, crc32
         self.ind_queue.put_nowait(value)
 
     def on_notification(self, value: bytes) -> None:
@@ -273,7 +276,8 @@ class Central:
         elif name == 'get':
             value = tlv.get(int(a[0]), int(a[1]) if len(a) > 1 else 0)
         elif name == 'ack':
-            value = tlv.ack(int(a[0]), int(a[1], 16))
+            crc = self.last_crc if a[1] == 'last' else int(a[1], 16)
+            value = tlv.ack(int(a[0]), crc if crc is not None else 0)
         elif name == 'cfg':
             value = tlv.cfg_set(int(a[0]), int(a[1]))
         elif name == 'reply':

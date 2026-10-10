@@ -49,6 +49,9 @@ Console commands (type `help` on the console for the full list):
 | `poweroff` | PMIC off; PWR turns the board back on |
 | `ble inject <hex>`, `ble inject off` | feed a ctrl TLV to the protocol layer over USB; answers print as `BLE-CTRL`/`BLE-DATA` lines (`bletest.py --serial`) |
 | `fbdump`, `reboot`, `wdtest` | screen dump, restart, stall a task under the watchdog (expect a reboot, reset reason 6) |
+| `ui demo talk\|fail\|away\|nospeech\|discard\|pair\|power\|sleep\|lowbatt` | play a UI flow with synthetic inputs (`power` never powers off) |
+| `ui show face\|controls\|recent\|settings\|about\|bright`, `ui expr <name>`, `ui state` | jump to a screen, set the eyes' expression, print the UI mode |
+| `ui perf [reset]`, `ui perf areas <n> [min_ms]`, `ui bench <s>`, `ui rim <pct\|orbit\|off> [track]` | render timing (changed frames, panel wait, the slowest frames), log the next n flushed areas, full-screen redraw benchmark, drive the rim by hand |
 
 - `scripts/idf` wraps EIM's PowerShell activation script. It removes `MSYSTEM` first, because `idf.py` silently does nothing (and exits 0) when it sees Git Bash.
 - COM9 is the coin. COM8 is an unrelated USB serial device (VID 1D50, PID 615E); never flash it.

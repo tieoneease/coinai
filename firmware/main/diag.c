@@ -26,6 +26,7 @@
 #include "lvgl.h"
 #include "pmic.h"
 #include "power.h"
+#include "ui.h"
 
 static const char *TAG = "diag";
 static i2c_master_bus_handle_t s_bus;
@@ -544,6 +545,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "ble", .help = "BLE status | ble bench [on|off] | ble forget | ble adv off|idle|deliver", .func = cmd_ble},
         {.command = "wdtest", .help = "Stall the console under the task watchdog (expect a reboot)", .func = cmd_wdtest},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
+        {.command = "ui", .help = "ui perf [reset] | ui demo <flow> | ui show <screen> | ui expr <name> | ui state", .func = ui_console},
     };
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
         ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]), TAG, "register %s", cmds[i].command);

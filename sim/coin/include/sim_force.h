@@ -5,7 +5,13 @@
 // the file calls the firmware makes are routed through functions that map the mount point onto the
 // simulator's data directory. Function-like macros leave `struct stat` alone.
 
+// newlib declares gmtime_r and localtime_r; mingw only with this, before <time.h> is first included.
+#ifndef _POSIX_THREAD_SAFE_FUNCTIONS
+#define _POSIX_THREAD_SAFE_FUNCTIONS 200112L
+#endif
+
 #include <assert.h>  // newlib's headers bring it in on the chip
+#include <time.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>

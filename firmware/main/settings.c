@@ -1,5 +1,7 @@
 #include "settings.h"
 
+#include <stdbool.h>
+
 #include "esp_log.h"
 #include "nvs.h"
 
@@ -7,7 +9,9 @@ static const char *TAG = "settings";
 
 typedef struct {
     const char *nvs_key;
-    uint16_t def, min, max;
+    uint16_t def;
+    int32_t min, max;
+    bool is_signed;  // the u16 holds an int16
 } spec_t;
 
 static const spec_t SPECS[] = {
@@ -15,6 +19,7 @@ static const spec_t SPECS[] = {
     [SET_BRIGHTNESS] = {"brightness", 100, 1, 100},
     [SET_IDLE_S] = {"idle_s", 30, 5, 3600},
     [SET_OFF_AFTER_H] = {"off_h", 0, 0, 24 * 30},
+    [SET_UTC_OFFSET_MIN] = {"utc_off", SETTINGS_UTC_OFFSET_UNSET, -12 * 60, 14 * 60, true},
 };
 #define NSPECS (sizeof SPECS / sizeof SPECS[0])
 
@@ -25,13 +30,19 @@ static bool valid_key(setting_t key)
     return key > 0 && key < NSPECS && SPECS[key].nvs_key;
 }
 
+static bool in_range(setting_t key, uint16_t value)
+{
+    int32_t v = SPECS[key].is_signed ? (int16_t)value : value;
+    return v >= SPECS[key].min && v <= SPECS[key].max;
+}
+
 void settings_load(void)
 {
     nvs_handle_t nvs;
     bool open = nvs_open("cfg", NVS_READONLY, &nvs) == ESP_OK;
     for (setting_t k = 1; k < NSPECS; k++) {
         uint16_t v = SPECS[k].def;
-        if (open && nvs_get_u16(nvs, SPECS[k].nvs_key, &v) == ESP_OK && (v < SPECS[k].min || v > SPECS[k].max)) {
+        if (open && nvs_get_u16(nvs, SPECS[k].nvs_key, &v) == ESP_OK && !in_range(k, v)) {
             v = SPECS[k].def;
         }
         s_val[k] = v;
@@ -48,7 +59,7 @@ uint16_t settings_get(setting_t key)
 
 esp_err_t settings_set(setting_t key, uint16_t value)
 {
-    if (!valid_key(key) || value < SPECS[key].min || value > SPECS[key].max) {
+    if (!valid_key(key) || !in_range(key, value)) {
         return ESP_ERR_INVALID_ARG;
     }
     s_val[key] = value;

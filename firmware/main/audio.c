@@ -212,7 +212,7 @@ static void finish_clip(bool discard)
     s_file = NULL;
     if (discard) {
         clipstore_remove(s_clip_id);
-        ESP_LOGI(TAG, "clip %u discarded (tap)", s_clip_id);
+        ESP_LOGI(TAG, "clip %u discarded", s_clip_id);
     } else {
         res.size = s_ogg.bytes;
         res.duration_ms = s_frames * 20;

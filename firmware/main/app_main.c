@@ -2,7 +2,7 @@
 //
 // PWR hold = record. PWR tap = standby once the phone has its clips (from Active) or screen on
 // (from standby). BOOT held, then PWR held 3 s = power off. A wake by PWR that is still held
-// records at once.
+// records at once. BOOT held for 1 s while recording discards the clip.
 
 #include <inttypes.h>
 #include "audio.h"
@@ -43,6 +43,10 @@ static const char *TAG = "coinai";
 // After a PWR tap, how long to wait for a phone that has not connected yet.
 #define TAP_DELIVERY_S      10
 #define POWEROFF_COMBO_MS   3000
+// BOOT held this long while recording discards the clip (a phone streaming it gets ERROR 1).
+#define DISCARD_HOLD_MS     1000
+// The eyes get sleepy this long before the idle timeout.
+#define DROWSY_MS           4000
 // Provisional until phase 9 measures the cell: about 5% left on a Li-ion cell, and the 3.3 V
 // buck has no headroom below this. 15 readings = 3 s, so radio bursts do not trigger it.
 #define LOW_BATTERY_MV      3450
@@ -53,7 +57,7 @@ static const char *TAG = "coinai";
 // timestamp of their own, so their press length is estimated with it.
 #define WAKE_TO_BOOT_MS     113
 
-typedef enum { CTL_CLIP, CTL_STANDBY, CTL_POWEROFF, CTL_WAKE_WAS_TAP } ctl_type_t;
+typedef enum { CTL_CLIP, CTL_STANDBY, CTL_POWEROFF, CTL_POWEROFF_BATTERY, CTL_WAKE_WAS_TAP } ctl_type_t;
 typedef struct {
     ctl_type_t type;
     audio_clip_result_t clip;
@@ -62,6 +66,8 @@ typedef struct {
 static QueueHandle_t s_ctl;
 static esp_timer_handle_t s_combo_timer;
 static esp_timer_handle_t s_test_timer;
+static esp_timer_handle_t s_discard_timer;
+static volatile bool s_discard_armed;
 static wake_kind_t s_wake;
 static volatile bool s_wake_hold;        // the PWR hold that woke us has not been released yet
 static volatile bool s_combo;            // PWR went down with BOOT held: power-off gesture
@@ -88,6 +94,7 @@ static void on_clip(const audio_clip_result_t *clip, bool started, void *ctx)
     if (started) {
         return;
     }
+    ui_event(UI_EV_CLIP_DONE, clip);
     if (!clip->discarded) {
         s_last_clip_ms = clip->duration_ms;
         s_last_clip = clip->id;
@@ -109,6 +116,28 @@ static void on_test_timer(void *arg)
     audio_rec_stop(false);
 }
 
+static void on_discard_timer(void *arg)
+{
+    bool pwr, boot;
+    input_get(&pwr, &boot);
+    if (s_discard_armed && boot && audio_is_recording()) {
+        ESP_LOGI(TAG, "BOOT held while recording: clip discarded");
+        ui_event(UI_EV_DISCARDED, NULL);
+        audio_rec_stop(true);
+    }
+    s_discard_armed = false;
+}
+
+static void ui_standby_hook(void)
+{
+    post(CTL_STANDBY, NULL);
+}
+
+static void ui_poweroff_hook(void)
+{
+    post(CTL_POWEROFF, NULL);
+}
+
 static void on_input(input_event_t ev, uint32_t held_ms, void *ctx)
 {
     s_last_activity_us = esp_timer_get_time();
@@ -121,6 +150,7 @@ static void on_input(input_event_t ev, uint32_t held_ms, void *ctx)
             s_combo = true;
             esp_timer_start_once(s_combo_timer, POWEROFF_COMBO_MS * 1000);
             ESP_LOGI(TAG, "BOOT+PWR: keep holding %d s to power off", POWEROFF_COMBO_MS / 1000);
+            ui_event(UI_EV_COMBO_START, NULL);
             break;
         }
         s_rec_started_us = esp_timer_get_time();
@@ -131,6 +161,7 @@ static void on_input(input_event_t ev, uint32_t held_ms, void *ctx)
         if (s_combo) {
             s_combo = false;
             esp_timer_stop(s_combo_timer);
+            ui_event(UI_EV_COMBO_CANCEL, NULL);
             break;
         }
         if (s_wake_hold) {  // end of the press that woke us
@@ -154,12 +185,25 @@ static void on_input(input_event_t ev, uint32_t held_ms, void *ctx)
         break;
     case INPUT_BOOT_DOWN:
         s_boot_presses++;
+        ui_event(UI_EV_BOOT_DOWN, NULL);
+        if (audio_is_recording() && !s_combo) {
+            s_discard_armed = true;
+            esp_timer_start_once(s_discard_timer, DISCARD_HOLD_MS * 1000);
+            ui_event(UI_EV_DISCARD_ARMED, NULL);
+        }
         break;
     case INPUT_BOOT_UP:
         if (s_combo) {
             s_combo = false;
             esp_timer_stop(s_combo_timer);
+            ui_event(UI_EV_COMBO_CANCEL, NULL);
         }
+        if (s_discard_armed) {
+            s_discard_armed = false;
+            esp_timer_stop(s_discard_timer);
+            ui_event(UI_EV_DISCARD_CANCEL, NULL);
+        }
+        ui_event(UI_EV_BOOT_UP, NULL);
         break;
     }
 }
@@ -178,7 +222,7 @@ static void status_task(void *arg)
         if (st.pmic_ok && st.pmic.battery_present && !st.pmic.vbus_good && st.pmic.vbat_mv < LOW_BATTERY_MV) {
             if (++low_samples == LOW_BATTERY_SAMPLES) {
                 ESP_LOGW(TAG, "battery at %u mV: powering off", st.pmic.vbat_mv);
-                post(CTL_POWEROFF, NULL);
+                post(CTL_POWEROFF_BATTERY, NULL);
             }
         } else {
             low_samples = 0;
@@ -251,6 +295,7 @@ static void control_loop(lv_display_t *disp)
     int64_t deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
     int last_reply_state = -1;
     uint16_t last_reply_clip = 0;
+    bool drowsy = false;
     esp_task_wdt_add(NULL);  // standby and power-off decisions must not hang (D5)
     for (;;) {
         esp_task_wdt_reset();
@@ -281,10 +326,16 @@ static void control_loop(lv_display_t *disp)
             case CTL_STANDBY:
                 standby_asap = true;
                 standby_req_us = esp_timer_get_time();
-                display_set_brightness(0);
-                screen_off = true;
+                if (!screen_off) {
+                    ui_goodbye(UI_BYE_STANDBY);
+                    display_set_brightness(0);
+                    screen_off = true;
+                }
                 break;
             case CTL_POWEROFF:
+            case CTL_POWEROFF_BATTERY:
+                ui_set_drowsy(false);
+                ui_goodbye(m.type == CTL_POWEROFF ? UI_BYE_POWEROFF : UI_BYE_BATTERY);
                 power_off();
                 break;
             case CTL_WAKE_WAS_TAP:
@@ -313,6 +364,11 @@ static void control_loop(lv_display_t *disp)
         }
         if (standby_asap && idle_ms + 300 < (now - standby_req_us) / 1000) {
             standby_asap = false;  // touched or pressed again since the tap
+            if (screen_off && !audio_is_recording()) {
+                ui_screen_on();
+                display_set_brightness(settings_get(SET_BRIGHTNESS));
+                screen_off = false;
+            }
         }
         bool delivering = bs.pending > 0 && now < deliver_until_us;
         if (standby_asap) {
@@ -324,7 +380,17 @@ static void control_loop(lv_display_t *disp)
             }
             continue;
         }
-        bool keep_awake = audio_is_recording() || s_wake_hold || ble_busy() || bs.passkey || delivering;
+        bool keep_awake = audio_is_recording() || s_wake_hold || ble_busy() || bs.passkey || delivering ||
+                          ui_keep_awake();
+        int64_t limit_ms = (linger ? LINGER_S : settings_get(SET_IDLE_S)) * 1000LL;
+        bool want_drowsy = !keep_awake && !screen_off && idle_ms >= limit_ms - DROWSY_MS;
+        if (want_drowsy != drowsy) {
+            drowsy = want_drowsy;
+            ui_set_drowsy(drowsy);
+        }
+        if (screen_off && idle_ms < 1000 && !audio_is_recording()) {
+            ui_screen_on();  // touched or pressed: the eyes wake, then the light comes on
+        }
         if (keep_awake) {
             if (screen_off && idle_ms < 1000) {
                 display_set_brightness(settings_get(SET_BRIGHTNESS));
@@ -332,14 +398,20 @@ static void control_loop(lv_display_t *disp)
             }
             continue;
         }
-        int64_t limit_ms = (linger ? LINGER_S : settings_get(SET_IDLE_S)) * 1000LL;
         if (idle_ms >= limit_ms) {
             if (linger || !s_vbus) {
+                ui_goodbye(UI_BYE_STANDBY);
+                if (audio_is_recording() || s_wake_hold) {
+                    continue;  // PWR went down during the goodbye
+                }
                 power_enter_standby(0, false);
             } else if (!screen_off) {
                 ESP_LOGI(TAG, "idle on USB power: screen off");
+                ui_goodbye(UI_BYE_SCREEN_OFF);
                 display_set_brightness(0);
                 screen_off = true;
+                drowsy = false;
+                ui_set_drowsy(false);
             }
         } else if (screen_off && idle_ms < 1000) {
             display_set_brightness(settings_get(SET_BRIGHTNESS));
@@ -354,6 +426,7 @@ void app_main(void)
     s_wake = power_boot();
     bool record = power_wake_records(s_wake);
     s_ctl = xQueueCreate(8, sizeof(ctl_msg_t));
+    ui_preinit();
     if (record) {
         s_rec_started_us = esp_timer_get_time();
         audio_rec_start();
@@ -398,8 +471,10 @@ void app_main(void)
     }
     esp_timer_create_args_t combo = {.callback = on_combo_timer, .name = "combo"};
     esp_timer_create_args_t test = {.callback = on_test_timer, .name = "ptttest"};
+    esp_timer_create_args_t discard = {.callback = on_discard_timer, .name = "discard"};
     ESP_ERROR_CHECK(esp_timer_create(&combo, &s_combo_timer));
     ESP_ERROR_CHECK(esp_timer_create(&test, &s_test_timer));
+    ESP_ERROR_CHECK(esp_timer_create(&discard, &s_discard_timer));
     if (s_wake == WAKE_TIMER_TEST) {
         esp_timer_start_once(s_test_timer, TEST_HOLD_MS * 1000);
     }
@@ -412,7 +487,8 @@ void app_main(void)
     } else {
         display_set_brightness(settings_get(SET_BRIGHTNESS));
         if (bsp_display_lock(1000) == ESP_OK) {
-            ui_init();
+            const ui_hooks_t hooks = {.standby = ui_standby_hook, .power_off = ui_poweroff_hook};
+            ui_init(&hooks, s_wake);
             bsp_display_unlock();
         }
     }

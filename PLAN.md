@@ -175,7 +175,8 @@ The matrix runs each condition with the settings at their defaults and with all 
 | `clipstore` | LittleFS clip queue: write, flush, CRC, delete on ACK |
 | `ble` | NimBLE peripheral per PROTOCOL.md |
 | `net` | Wi-Fi STA (credentials from the app), SNTP, HTTPS OTA with rollback |
-| `ui` | LVGL 9 screens: status/watch face, recording, clips, pairing passkey, settings, OTA |
+| `ui` | LVGL 9 screens around the eyes bot (the default face): recording, send/think/reply, Recent, Controls, brightness, settings, pairing passkey, power off; flows and springs; IMU tilt, shake and face-down |
+| `eyes` | The eyes bot: one custom-drawn LVGL object (eyes, lids, rim progress/orbit, ripple, "z"s) that invalidates only what moved |
 | `imu` | QMI8658 (`waveshare/qmi8658`); raise-to-wake later |
 | `diag` | USB console: `i2cscan`, `pmic`, `rec`, `clips`, `clip get`, `ble`, `wifi`, `ota`, `sleep`, `fbdump` (frame → PNG over USB), boot timing |
 
@@ -216,6 +217,7 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
 | 2 | done: clips decode, loopback tone 65 dB above control | **you:** listen to a clip |
 | 3 | standby → first audio frame **208–229 ms** over 10 unattended trials (target 400 ms) | **you:** real PWR presses from Standby and Off; BOOT+PWR power-off; then disable the PMIC long-press (D5) |
 | 4 | firmware GATT server built: advertises (seen by the PC), RAM budget fixed (93 KB internal free), recording unaffected by the radio. Protocol layer passes 11/11 edge-case checks over the USB console link, including resume and GET-while-recording (`evidence/phase4-selftest-serial.txt`). App slice 2 merged (77 unit tests). **No over-the-air exchange with the device yet:** the PC's adapter is too deaf to hold a connection | **you:** USB debugging on the phone (installs the app and runs the link tests), or attach the PC's Wi-Fi/BT antenna; pairing passkey entry on the phone |
+| 8 (UI) | the eyes-bot UI from the signed-off motion study runs on the coin and in the simulator. In the simulator every flow and screen was checked frame by frame (talk, fail, away, pair, no-speech, discard, power, sleep, low battery; Controls, brightness, Settings, About, Recent), including a real REPLY from a central, the clock from `utc_offset_min` and the BOOT-hold discard. On the coin the idle face renders 13 changed frames/s at 3.3 ms each (4% busy); flows hitched to 43–55 ms frames, traced to whole-ring rim redraws and whole-paragraph text fades. The fix (the rim sweeps in and drains, and text fades in line by line) is built and checked in the simulator, **not yet re-measured on the coin** | **you:** look at it on the coin; face-down → screen off, tilt direction, BOOT held 1 s while recording discards |
 | sim | desktop simulator ([sim/README.md](sim/README.md)): the firmware runs as `coinsim.exe` with a browser UI. Over virtual BLE (Bumble, and netsim as the emulator uses) the full PROTOCOL.md exchange works with pairing and bonds, and a recorded sentence reaches SamBot exactly. It also exercised paths not yet tried on the device: cut-off clip recovery, low-battery off, idle Standby | **you:** enable Windows Hypervisor Platform and reboot, so the Android emulator can run the app against it |
 
 0. **Safety net and toolchains.**
