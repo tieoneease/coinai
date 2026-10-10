@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,6 +25,24 @@ esp_err_t clipstore_init(void)
         .format_if_mount_failed = true,
     };
     ESP_RETURN_ON_ERROR(esp_vfs_littlefs_register(&conf), TAG, "mount");
+    DIR *dir = opendir(BASE);  // discarded clips whose file was busy until the reboot
+    if (dir) {
+        uint16_t ids[16];
+        int n = 0;
+        struct dirent *e;
+        while ((e = readdir(dir)) != NULL && n < 16) {
+            unsigned id;
+            char ext[8];
+            if (sscanf(e->d_name, "%5u.%7s", &id, ext) == 2 && strcmp(ext, "dis") == 0 && id && id <= 65535) {
+                ids[n++] = (uint16_t)id;
+            }
+        }
+        closedir(dir);
+        for (int i = 0; i < n; i++) {
+            clipstore_remove(ids[i]);
+            ESP_LOGI(TAG, "clip %u: discarded before the reboot, deleted", ids[i]);
+        }
+    }
     size_t total = 0, used = 0;
     clipstore_usage(&total, &used);
     ESP_LOGI(TAG, "LittleFS mounted: %u KB used of %u KB", (unsigned)(used / 1024), (unsigned)(total / 1024));
@@ -56,7 +75,31 @@ static int cmp_clip(const void *a, const void *b)
     return (int)((const clip_info_t *)a)->id - (int)((const clip_info_t *)b)->id;
 }
 
-static volatile uint16_t s_discarded;  // a discarded clip whose file could not be removed yet
+static volatile uint16_t s_discarded;  // the latest discarded clip whose file could not be removed yet
+
+static void dis_path(uint16_t id, char *buf, size_t len)
+{
+    snprintf(buf, len, BASE "/%05u.dis", id);
+}
+
+bool clipstore_discarded(uint16_t id)
+{
+    if (!id) {
+        return false;
+    }
+    if (id == s_discarded) {
+        return true;
+    }
+    char path[32];
+    struct stat st;
+    dis_path(id, path, sizeof path);
+    return stat(path, &st) == 0;
+}
+
+bool clipstore_discard_pending(uint16_t id)
+{
+    return id && id == s_discarded;
+}
 
 int clipstore_list(clip_info_t *out, int max)
 {
@@ -70,7 +113,7 @@ int clipstore_list(clip_info_t *out, int max)
         unsigned id;
         char ext[8];
         if (sscanf(e->d_name, "%5u.%7s", &id, ext) != 2 || strcmp(ext, "ogg") != 0 || id == 0 || id > 65535 ||
-            id == s_discarded) {
+            clipstore_discarded((uint16_t)id)) {
             continue;
         }
         if (out) {
@@ -105,24 +148,34 @@ esp_err_t clipstore_remove(uint16_t id)
     meta_path(id, path, sizeof path);
     remove(path);
     clipstore_path(id, path, sizeof path);
-    if (remove(path) != 0) {
-        return ESP_ERR_NOT_FOUND;  // or still open (LittleFS refuses with EBUSY)
+    bool gone = remove(path) == 0;
+    if (!gone && errno != ENOENT) {
+        return ESP_ERR_INVALID_STATE;  // still open: LittleFS refuses with EBUSY
     }
+    dis_path(id, path, sizeof path);
+    remove(path);
     if (id == s_discarded) {
         s_discarded = 0;
     }
-    return ESP_OK;
+    return gone ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 void clipstore_discard(uint16_t id)
 {
+    uint16_t prev = s_discarded;
     s_discarded = id;  // first, so a transfer cannot rebuild its metadata in between
-    clipstore_remove(id);
-}
-
-bool clipstore_discarded(uint16_t id)
-{
-    return id && id == s_discarded;
+    if (prev && prev != id) {
+        clipstore_remove(prev);  // an earlier discard whose file was busy (its tombstone stays if it still is)
+    }
+    if (clipstore_remove(id) == ESP_ERR_INVALID_STATE) {
+        char path[32];
+        dis_path(id, path, sizeof path);
+        FILE *f = fopen(path, "wb");  // outlives a reboot: clipstore_init finishes the job
+        if (f) {
+            fclose(f);
+        }
+        ESP_LOGW(TAG, "clip %u is open: deleted when its transfer stops", id);
+    }
 }
 
 #define META_MAGIC 0x314D4F43u  // "COM1"

@@ -220,6 +220,9 @@ static void tx_stop(void)
         fclose(s_tx.f);
         s_tx.f = NULL;
     }
+    if (s_tx.active && clipstore_discarded(s_tx.clip)) {
+        clipstore_remove(s_tx.clip);  // discarded while this transfer held its file open
+    }
     s_tx.active = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_st.transferring = false;
@@ -277,11 +280,10 @@ static bool tx_step(void)
     if (!s_tx.active || (!console && (conn == LINK_CONN_NONE || !s_data_sub))) {
         return false;
     }
-    if (clipstore_discarded(s_tx.clip)) {
-        // Discarded while streaming: stop with ERROR 1, then delete it now that our handle is closed.
+    if (clipstore_discard_pending(s_tx.clip)) {
+        // Discarded while streaming: stop with ERROR 1 (tx_stop deletes it once our handle is closed).
         uint16_t clip = s_tx.clip;
         tx_stop();
-        clipstore_remove(clip);
         send_error(MSG_GET, ERR_UNKNOWN_CLIP, clip);
         refresh_pending();
         send_status();

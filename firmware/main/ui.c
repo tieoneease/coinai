@@ -1930,6 +1930,9 @@ static void handle_event(const ui_msg_t *m)
 static void react(void)
 {
     const inputs_t *in = &s_in, *pv = &s_prev;
+    if (!s_drowsy) {
+        s_drowsy_done = false;  // a new idle period may get sleepy again
+    }
     if (!s_prev_valid) {
         s_prev = s_in;
         s_prev_valid = true;
@@ -2143,9 +2146,6 @@ static void react(void)
     }
 
     // Drowsy: the idle timeout is near.
-    if (!s_drowsy) {
-        s_drowsy_done = false;
-    }
     if (s_drowsy && !s_drowsy_done && !s_drowsy_shown && (s_mode == M_FACE || is_content(s_mode))) {
         s_drowsy_done = true;
         FLOW(f_drowsy);
@@ -2474,7 +2474,7 @@ static void tick_cb(lv_timer_t *t)
         // in the same tick as the start), this screen must not stay up keeping the coin awake.
         bool pwr, boot;
         input_get(&pwr, &boot);
-        if (!s_demo && (!pwr || !boot) && s_now - s_t0 > 0.1f) {
+        if (!s_demo && s_flow == f_powerhold && s_bye_req < 0 && (!pwr || !boot) && s_now - s_t0 > 0.1f) {
             eyes_blink(1, 1);
             go_face();
         }
