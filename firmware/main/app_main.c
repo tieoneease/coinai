@@ -6,6 +6,7 @@
 
 #include <inttypes.h>
 #include "audio.h"
+#include "battlog.h"
 #include "ble.h"
 #include "bsp/esp-bsp.h"
 #include "clipstore.h"
@@ -245,6 +246,10 @@ static void status_task(void *arg)
                                st.pmic_ok && st.pmic.charging,
                                s_vbus, st.recording);
         ble_get_status(&st.ble);
+        if (st.pmic_ok) {
+            battlog_sample(&st.pmic, (display_get_brightness() > 0 ? BATTLOG_SCREEN : 0) |
+                                         (st.recording ? BATTLOG_REC : 0) | (st.ble.connected ? BATTLOG_LINK : 0));
+        }
 
         if (bsp_display_lock(100) == ESP_OK) {
             ui_update(&st);

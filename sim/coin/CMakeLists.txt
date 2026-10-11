@@ -67,7 +67,7 @@ target_compile_definitions(lvgl PUBLIC ${SIM_DEFINES})
 target_compile_options(lvgl PRIVATE -w)
 
 # ---------- the firmware and its simulated hardware ----------
-set(FW_SRC app_main.c pmic.c input.c imu.c ui.c eyes.c diag.c audio.c ogg.c clipstore.c power.c ble.c settings.c)
+set(FW_SRC app_main.c battlog.c pmic.c input.c imu.c ui.c eyes.c diag.c audio.c ogg.c clipstore.c power.c ble.c settings.c)
 list(TRANSFORM FW_SRC PREPEND ${FW}/main/)
 set(SIM_SRC main.c simlink.c freertos.c esp_core.c storage.c periph.c audio_dev.c display_sim.c ble_link_sim.c)
 list(TRANSFORM SIM_SRC PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)

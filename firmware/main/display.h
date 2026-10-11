@@ -9,3 +9,4 @@
 lv_display_t *display_start(void);
 // Panel brightness 0-100 (0 = dark; the panel and LVGL keep running).
 esp_err_t display_set_brightness(int percent);
+int display_get_brightness(void);  // the last value set

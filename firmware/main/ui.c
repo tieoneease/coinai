@@ -19,6 +19,8 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "misc/lv_text_private.h"  // lv_text_get_next_line
+#include "display/lv_display_private.h"  // inv_areas, LV_INV_BUF_SIZE (see inv_cb)
+#include "misc/lv_area_private.h"         // lv_area_join
 #include "nvs.h"
 #include "power.h"
 #include "settings.h"
@@ -378,10 +380,15 @@ static lv_obj_t *build_body(const char *utf8, int y0, int width, int max_h, cons
     char text[256];
     ascii_text(text, sizeof text, utf8);
     const lv_font_t *font = fit_font(text, width, max_h, largest);
-    lv_obj_t *l = label(s_scr, font, color, text);
+    // Width and wrapping before the text: a label first measured at zero width wraps every letter
+    // onto its own line, and its first layout then invalidates that full-height box (334x466,
+    // a whole-screen redraw on the coin).
+    lv_obj_t *l = label(s_scr, font, color, "");
     lv_obj_set_width(l, width);
     lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_line_space(l, 2, 0);
+    lv_obj_update_layout(l);  // the label measures text against its coords, not its width style
+    lv_label_set_text(l, text);
     lv_obj_align(l, LV_ALIGN_TOP_MID, 0, y0 - lv_font_get_line_height(font) / 2);
     return l;
 }
@@ -2382,6 +2389,8 @@ static int s_log_frames;  // ui perf areas <n> [min ms]: print the flushed areas
 static uint32_t s_log_min_us;
 static lv_area_t s_log_area[LOG_AREAS];
 static int s_nlog;
+static lv_area_t s_log_inv[LV_INV_BUF_SIZE];  // the frame's dirty areas before LVGL joins them
+static int s_ninv;
 
 static struct {
     int64_t since_us, refr_start_us, wait_start_us;
@@ -2389,13 +2398,62 @@ static struct {
     uint64_t px;
     uint32_t frame_px;
     uint32_t ticks, tick_sum_us, tick_max_us;
+    uint32_t merged;  // dirty areas merged by inv_cb instead of overflowing LVGL's list
     slow_frame_t slow[SLOW_FRAMES];  // the slowest frames, for finding hitches
 } s_perf;
+
+static uint32_t area_size(const lv_area_t *a)
+{
+    return (uint32_t)lv_area_get_width(a) * (uint32_t)lv_area_get_height(a);
+}
+
+// LVGL keeps 32 dirty areas per frame and redraws the whole screen when a 33rd comes (lv_refr.c).
+// A busy frame (lines of text fading while the eyes and rim move, two UI ticks per slow refresh)
+// can get there: 188 kpx, 29 ms on the coin. Near the limit, a new area is merged into the
+// existing one it grows least, and handed back as that area, so lv_inv_area sees it as already
+// covered and stores nothing.
+static void inv_cb(lv_event_t *e)
+{
+    lv_display_t *disp = lv_event_get_target(e);
+    lv_area_t *a = lv_event_get_param(e);
+    if (s_log_frames && a && lv_area_get_size(a) > 100000) {
+        // A layout or style change dirtying most of the screen; add esp_backtrace_print() here to
+        // find which (it found the zero-width label measure fixed in build_body).
+        printf("big dirty area [%d,%d %dx%d]\n", (int)a->x1, (int)a->y1, (int)lv_area_get_width(a),
+               (int)lv_area_get_height(a));
+    }
+    if (!disp || !a || disp->inv_p < LV_INV_BUF_SIZE - 1) {
+        return;
+    }
+    int best = -1;
+    uint32_t best_cost = UINT32_MAX;
+    for (int i = 0; i < disp->inv_p; i++) {
+        lv_area_t j;
+        lv_area_join(&j, &disp->inv_areas[i], a);
+        uint32_t cost = area_size(&j) - area_size(&disp->inv_areas[i]);
+        if (cost < best_cost) {
+            best_cost = cost;
+            best = i;
+        }
+    }
+    if (best >= 0) {
+        lv_area_join(&disp->inv_areas[best], &disp->inv_areas[best], a);
+        *a = disp->inv_areas[best];
+        s_perf.merged++;
+    }
+}
 
 static void perf_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_REFR_START) {
+        lv_display_t *disp = lv_event_get_target(e);
+        s_ninv = 0;
+        if (s_log_frames && disp) {
+            for (int i = 0; i < disp->inv_p && i < LV_INV_BUF_SIZE; i++) {
+                s_log_inv[s_ninv++] = disp->inv_areas[i];
+            }
+        }
         s_perf.refr_start_us = esp_timer_get_time();
         s_perf.frame_px = 0;
         s_perf.frame_wait_us = 0;
@@ -2426,6 +2484,11 @@ static void perf_cb(lv_event_t *e)
             for (int i = 0; i < s_nlog; i++) {
                 printf(" [%ld,%ld %ldx%ld]", (long)s_log_area[i].x1, (long)s_log_area[i].y1,
                        (long)lv_area_get_width(&s_log_area[i]), (long)lv_area_get_height(&s_log_area[i]));
+            }
+            printf("%s", "\n  dirty:");
+            for (int i = 0; i < s_ninv; i++) {
+                printf(" [%ld,%ld %ldx%ld]", (long)s_log_inv[i].x1, (long)s_log_inv[i].y1,
+                       (long)lv_area_get_width(&s_log_inv[i]), (long)lv_area_get_height(&s_log_inv[i]));
             }
             printf("%s", "\n");
         }
@@ -2537,6 +2600,7 @@ void ui_init(const ui_hooks_t *hooks, int wake_kind)
         lv_display_add_event_cb(disp, perf_cb, LV_EVENT_REFR_READY, NULL);
         lv_display_add_event_cb(disp, perf_cb, LV_EVENT_FLUSH_WAIT_START, NULL);
         lv_display_add_event_cb(disp, perf_cb, LV_EVENT_FLUSH_WAIT_FINISH, NULL);
+        lv_display_add_event_cb(disp, inv_cb, LV_EVENT_INVALIDATE_AREA, NULL);
     }
     perf_reset();
     memset(&s_prev, 0, sizeof s_prev);  // a recording already running at boot is an edge
@@ -2629,9 +2693,9 @@ int ui_console(int argc, char **argv)
         printf("ui perf: %.1f s, %lu frames (%.1f fps), refresh mean %.2f ms max %.2f ms, %.1f kpx/frame, busy %.0f%%\n",
                s, (unsigned long)n, n / (s > 0 ? s : 1), n ? s_perf.refr_sum_us / 1000.0 / n : 0,
                s_perf.refr_max_us / 1000.0, n ? s_perf.px / 1000.0 / n : 0, s > 0 ? s_perf.refr_sum_us / 1e4 / s : 0);
-        printf("  of which waiting for the panel %.2f ms/frame; UI tick mean %.2f ms max %.2f ms\n",
+        printf("  of which waiting for the panel %.2f ms/frame; UI tick mean %.2f ms max %.2f ms; %lu dirty areas merged\n",
                n ? s_perf.wait_sum_us / 1000.0 / n : 0, s_perf.ticks ? s_perf.tick_sum_us / 1000.0 / s_perf.ticks : 0,
-               s_perf.tick_max_us / 1000.0);
+               s_perf.tick_max_us / 1000.0, (unsigned long)s_perf.merged);
         for (int i = 0; i < SLOW_FRAMES; i++) {
             const slow_frame_t *f = &s_perf.slow[i];
             if (f->us) {

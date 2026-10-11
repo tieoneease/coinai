@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "audio.h"
+#include "battlog.h"
 #include "ble.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -201,6 +202,7 @@ void power_enter_standby(uint32_t timer_s, bool test_record)
 {
     ESP_LOGI(TAG, "standby: timer %" PRIu32 " s%s", timer_s, test_record ? ", records on wake" : "");
     esp_task_wdt_delete(NULL);  // the wait for PWR release below may be long; not subscribed is fine
+    battlog_event('S', NULL, 0);
     peripherals_down();
 
     // Hold the panel and touch controllers in reset: the panel stops scanning and touch stops
@@ -234,6 +236,7 @@ void power_off(void)
 {
     ESP_LOGW(TAG, "power off");
     esp_task_wdt_delete(NULL);
+    battlog_event('O', NULL, 0);
     peripherals_down();
     vTaskDelay(pdMS_TO_TICKS(50));  // let the log drain
     pmic_power_off();

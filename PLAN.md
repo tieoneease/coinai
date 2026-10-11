@@ -269,7 +269,7 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
    - Mockups first, then build.
    - *Evidence:* FPS and flush-time numbers, tear-free motion (**you** check), `fbdump` captures.
 9. **Power polish and battery size.**
-   - Measure the drain in each state.
+   - Measure the drain in each state. There is no current sensor, so the firmware logs battery voltage, fuel gauge and state on flash (`battlog`: every minute on battery, at standby entry and wake), and `scripts/battlog.py` turns that into drain rates per state.
    - Estimate the capacity by timing a full charge at a known current, then set the final charge current.
    - *Evidence:* measured drain, projected standby time, and the capacity estimate.
 

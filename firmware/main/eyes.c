@@ -680,10 +680,16 @@ static void invalidate_rim(void)
         invalidate_range(a < b ? a : b, a > b ? a : b);
     }
     bool same = d->on && p->on && lv_color_eq(d->color, p->color) && abs(wrap180(d->tail - p->tail)) < 120 &&
-                abs(wrap180(d->head - p->head)) < 120 && (d->head - d->tail >= 360) == (p->head - p->tail >= 360);
+                abs(wrap180(d->head - p->head)) < 120;
     if (same) {
         invalidate_moved(p->tail, d->tail);
         invalidate_moved(p->head, d->head);
+        if ((d->head - d->tail >= 360) != (p->head - p->tail >= 360)) {
+            // Closing into a ring or opening from one: only the junction changes (round ends vs
+            // none), so only it is redrawn, not the whole ring (85 kpx, 44 ms on the coin).
+            invalidate_range(d->tail, d->tail);
+            invalidate_range(d->head, d->head);
+        }
         return;
     }
     if (p->on && (d->on != p->on || !lv_color_eq(d->color, p->color) || d->tail != p->tail || d->head != p->head)) {

@@ -48,6 +48,7 @@ Console commands (type `help` on the console for the full list):
 | `ptttest [n]`, `pttlog [clear]`, `wake` | unattended standby→record latency trials and the latency records |
 | `poweroff` | PMIC off; PWR turns the board back on |
 | `ble inject <hex>`, `ble inject off` | feed a ctrl TLV to the protocol layer over USB; answers print as `BLE-CTRL`/`BLE-DATA` lines (`bletest.py --serial`) |
+| `battlog [clear]` | battery log as CSV (`rtc_s,event,vbat_mv,soc_pct,flags`); `python scripts/battlog.py COM9` reads it and estimates drain per state and battery life |
 | `fbdump`, `reboot`, `wdtest` | screen dump, restart, stall a task under the watchdog (expect a reboot, reset reason 6) |
 | `ui demo talk\|fail\|away\|nospeech\|discard\|pair\|power\|sleep\|lowbatt` | play a UI flow with synthetic inputs (`power` never powers off) |
 | `ui show face\|controls\|recent\|settings\|about\|bright`, `ui expr <name>`, `ui state` | jump to a screen, set the eyes' expression, print the UI mode |

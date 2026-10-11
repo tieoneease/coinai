@@ -55,12 +55,20 @@ static esp_err_t tx_param(uint8_t cmd, const void *param, size_t len)
     return esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (cmd << 8), param, len);  // QSPI write opcode
 }
 
+static int s_brightness;
+
 esp_err_t display_set_brightness(int percent)
 {
     ESP_RETURN_ON_FALSE(s_io, ESP_ERR_INVALID_STATE, TAG, "not started");
     ESP_RETURN_ON_FALSE(percent >= 0 && percent <= 100, ESP_ERR_INVALID_ARG, TAG, "0-100");
     uint8_t v = (uint8_t)(percent * 255 / 100);
+    s_brightness = percent;
     return tx_param(0x51, &v, 1);
+}
+
+int display_get_brightness(void)
+{
+    return s_brightness;
 }
 
 lv_display_t *display_start(void)

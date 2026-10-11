@@ -27,6 +27,7 @@
 #include "pmic.h"
 #include "power.h"
 #include "ui.h"
+#include "battlog.h"
 
 static const char *TAG = "diag";
 static i2c_master_bus_handle_t s_bus;
@@ -201,6 +202,16 @@ static void base64_line(const uint8_t *in, size_t len, char *out)
 
 // Renders the active screen into an RGB565 buffer and prints it as base64 between markers.
 // scripts/fbdump.py turns the output into a PNG.
+static int cmd_battlog(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "clear") == 0) {
+        battlog_clear();
+    } else {
+        battlog_print();
+    }
+    return 0;
+}
+
 static int cmd_fbdump(int argc, char **argv)
 {
     if (bsp_display_lock(2000) != ESP_OK) {
@@ -529,6 +540,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "pmic", .help = "PMIC status and registers: pmic | pmic reg <hex> [<hex>] | pmic chg <mA>", .func = cmd_pmic},
         {.command = "imu", .help = "One IMU sample", .func = cmd_imu},
         {.command = "stats", .help = "Uptime, reset reason, heap", .func = cmd_stats},
+        {.command = "battlog", .help = "Battery log as CSV (rtc_s,event,vbat_mv,soc_pct,flags): battlog [clear]", .func = cmd_battlog},
         {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
         {.command = "rec", .help = "Record a clip: rec <seconds> | rec start | rec stop", .func = cmd_rec},
         {.command = "clips", .help = "List stored clips and storage use", .func = cmd_clips},

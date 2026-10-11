@@ -40,6 +40,8 @@ static void send_panel(int brightness)
     sim_send(IPC_PANEL, p, 2);
 }
 
+static int s_brightness;
+
 esp_err_t display_set_brightness(int percent)
 {
     if (!s_disp) {
@@ -49,8 +51,14 @@ esp_err_t display_set_brightness(int percent)
         return ESP_ERR_INVALID_ARG;
     }
     // The panel takes 0-255 (register 0x51); report what that register would hold, as a percentage.
+    s_brightness = percent;
     send_panel((percent * 255 / 100) * 100 / 255);
     return ESP_OK;
+}
+
+int display_get_brightness(void)
+{
+    return s_brightness;
 }
 
 void sim_touch_input(bool pressed, uint16_t x, uint16_t y)
