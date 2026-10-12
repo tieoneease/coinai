@@ -40,6 +40,9 @@ data class ReceivedClip(
 interface ClipStore {
     suspend fun latest(device: String, clip: Int): TransferRecord?
 
+    /** Clip ids of [device] with an unfinished (receiving) transfer. */
+    suspend fun unfinished(device: String): List<Int>
+
     /** The clip's unfinished record, or a new one when there is none (or the latest is received). */
     suspend fun beginTransfer(device: String, clip: Int): TransferRecord
 

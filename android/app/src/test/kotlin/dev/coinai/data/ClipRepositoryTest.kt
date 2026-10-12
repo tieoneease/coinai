@@ -71,6 +71,16 @@ class ClipRepositoryTest {
     }
 
     @Test
+    fun unfinishedListsReceivingClipsOfTheDeviceOnly() = runBlocking {
+        received(clip = 7)
+        repo.beginTransfer("AA:BB", 9)
+        repo.beginTransfer("AA:BB", 8)
+        repo.beginTransfer("CC:DD", 5)
+        assertEquals(listOf(9, 8), repo.unfinished("AA:BB"))
+        assertEquals(listOf(5), repo.unfinished("CC:DD"))
+    }
+
+    @Test
     fun transferResumesThenCommitsAndMovesTheFile() = runBlocking {
         val first = repo.beginTransfer("AA:BB", 7)
         repo.saveProgress(first, 4096)

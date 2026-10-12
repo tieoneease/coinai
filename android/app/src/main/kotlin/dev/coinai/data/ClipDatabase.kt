@@ -55,6 +55,9 @@ interface ClipDao {
     @Query("SELECT * FROM clips WHERE device = :device AND clipId = :clipId ORDER BY id DESC LIMIT 1")
     suspend fun latest(device: String, clipId: Int): ClipEntity?
 
+    @Query("SELECT clipId FROM clips WHERE device = :device AND state = 'RECEIVING' GROUP BY clipId ORDER BY MIN(id)")
+    suspend fun receivingClipIds(device: String): List<Int>
+
     @Query("SELECT * FROM clips ORDER BY id DESC")
     fun observeAll(): Flow<List<ClipEntity>>
 

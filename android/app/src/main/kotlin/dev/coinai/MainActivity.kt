@@ -20,13 +20,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -66,6 +72,10 @@ import dev.coinai.clips.ProcessingSettings
 import dev.coinai.sambot.SambotClient
 import dev.coinai.settings.DeviceStatus
 import dev.coinai.settings.SambotSettings
+import dev.coinai.settings.WifiNetworkInfo
+import dev.coinai.settings.WifiNetworkState
+import dev.coinai.sync.CoinWifi
+import dev.coinai.sync.DeliveryOrder
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
@@ -108,6 +118,8 @@ private fun MainScreen(app: CoinaiApp) {
             if (clips.isEmpty()) item { Text("No clips yet.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             items(clips, key = { it.id }) { clip -> ClipRow(app, clip, player) }
             item { SambotSection(app) }
+            item { DeliverySection(app) }
+            item { CoinWifiSection(app) }
             item { ProcessingSection(app) }
         }
     }
@@ -343,6 +355,163 @@ private fun SambotSection(app: CoinaiApp) {
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
+        }
+    }
+}
+
+private fun DeliveryOrder.label(): String = when (this) {
+    DeliveryOrder.WIFI_FIRST -> "Wi-Fi first"
+    DeliveryOrder.PHONE_FIRST -> "Phone first"
+    DeliveryOrder.PHONE_ONLY -> "Phone only"
+}
+
+private fun DeliveryOrder.description(): String = when (this) {
+    DeliveryOrder.WIFI_FIRST -> "The coin sends clips to SamBot itself on a known network; this phone gets them when it can't."
+    DeliveryOrder.PHONE_FIRST -> "Clips come to this phone when it's connected; the coin uses Wi-Fi only without it."
+    DeliveryOrder.PHONE_ONLY -> "Clips always come to this phone."
+}
+
+/** PROTOCOL.md "Wi-Fi delivery": `CFG_SET` key 0x06, sent at every sync and at once during one. */
+@Composable
+private fun DeliverySection(app: CoinaiApp) {
+    val scope = rememberCoroutineScope()
+    val stored by app.settings.delivery.collectAsState(initial = null)
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Delivery", style = MaterialTheme.typography.titleMedium)
+            Column(Modifier.selectableGroup()) {
+                DeliveryOrder.entries.forEach { order ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = stored == order,
+                                enabled = stored != null,
+                                role = Role.RadioButton,
+                                onClick = { scope.launch { app.settings.saveDelivery(order) } },
+                            )
+                            .padding(vertical = 4.dp),
+                    ) {
+                        RadioButton(selected = stored == order, onClick = null, enabled = stored != null)
+                        Column(modifier = Modifier.padding(start = 12.dp)) {
+                            Text(order.label())
+                            Text(
+                                order.description(),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            Text(
+                "Wi-Fi delivery needs a network below and the SamBot token on the coin, set over its USB console. " +
+                    "The coin gets this setting at its next sync.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun WifiNetworkInfo.stateLabel(): String = when {
+    !passwordReadable -> "Password unreadable on this phone; remove and add again"
+    state == WifiNetworkState.WAITING -> "Waiting for the coin's next sync"
+    state == WifiNetworkState.SENT -> "Sent to the coin"
+    else -> "The coin refused it (error ${errorCode ?: "?"})"
+}
+
+/** The coin's networks for Wi-Fi delivery (`WIFI_SET`), queued until the next sync. */
+@Composable
+private fun CoinWifiSection(app: CoinaiApp) {
+    val scope = rememberCoroutineScope()
+    val networks by app.settings.wifiNetworks.collectAsState(initial = emptyList())
+    var ssid by rememberSaveable { mutableStateOf("") }
+    // Not saveable: the password stays out of the saved instance state.
+    var password by remember { mutableStateOf("") }
+    var open by rememberSaveable { mutableStateOf(false) }
+    var note by remember { mutableStateOf<String?>(null) }
+
+    val ssidError = if (ssid.isEmpty()) null else CoinWifi.ssidError(ssid)
+    val passwordError = when {
+        open || password.isEmpty() -> null
+        else -> CoinWifi.passwordError(password)
+    }
+    val canAdd = CoinWifi.ssidError(ssid) == null && (open || (password.isNotEmpty() && passwordError == null))
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Coin Wi-Fi", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "The coin keeps the ${CoinWifi.COIN_KEEPS} newest networks. It needs 2.4 GHz Wi-Fi without a sign-in page. " +
+                    "Removing a network here does not remove it from the coin, which cannot forget one over Bluetooth yet; " +
+                    "it drops the oldest when newer ones arrive.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            networks.asReversed().forEach { n ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(n.ssid + if (n.open) " (open)" else "")
+                        Text(
+                            n.stateLabel(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (n.state == WifiNetworkState.REFUSED || !n.passwordReadable) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { scope.launch { app.settings.removeWifiNetwork(n.id) } }) { Text("Remove") }
+                }
+            }
+            OutlinedTextField(
+                value = ssid,
+                onValueChange = { ssid = it; note = null },
+                label = { Text("Network name (SSID)") },
+                isError = ssidError != null,
+                supportingText = ssidError?.let { { Text(it) } },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.toggleable(value = open, role = Role.Checkbox, onValueChange = { open = it; note = null }),
+            ) {
+                Checkbox(checked = open, onCheckedChange = null)
+                Text("Open network (no password)", modifier = Modifier.padding(start = 12.dp))
+            }
+            if (!open) {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it; note = null },
+                    label = { Text("Password") },
+                    isError = passwordError != null,
+                    supportingText = { Text(passwordError ?: "8 to 64 characters (non-ASCII ones count as 2 or more)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Button(
+                enabled = canAdd,
+                onClick = {
+                    val name = ssid
+                    val pass = if (open) "" else password
+                    scope.launch {
+                        note = try {
+                            app.settings.addWifiNetwork(name, pass)
+                            ssid = ""
+                            password = ""
+                            open = false
+                            "Added. It goes to the coin at its next sync."
+                        } catch (e: IllegalArgumentException) {
+                            e.message
+                        }
+                    }
+                },
+            ) { Text("Add network") }
+            note?.let { Text(it, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
         }
     }
 }

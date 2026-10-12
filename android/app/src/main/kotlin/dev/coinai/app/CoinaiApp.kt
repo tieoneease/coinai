@@ -79,6 +79,7 @@ class CoinaiApp : Application() {
             override fun onClipReceived(clip: ReceivedClip) = ClipWorker.enqueue(this@CoinaiApp, clip.rowId)
             override fun onLog(device: String, message: String) = log("$device: $message")
         },
+        settings = settings,
     )
 
     /** Manual resend from the clip list. */

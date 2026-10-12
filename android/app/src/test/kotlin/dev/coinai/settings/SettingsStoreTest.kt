@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.PreferencesSerializer
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import dev.coinai.protocol.CtrlMessage
+import dev.coinai.protocol.ErrorCode
+import dev.coinai.sync.DeliveryOrder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +18,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -109,6 +112,84 @@ class SettingsStoreTest {
         val other = JvmSecretBox()
         val store = SettingsStore(dataStore(file), other)
         assertEquals(SambotSettings("https://a.example", ""), store.sambot.first())
+    }
+
+    @Test
+    fun deliveryDefaultsToWifiFirst() = runBlocking {
+        val store = SettingsStore(dataStore(File(tmp.root, "d.preferences_pb")), JvmSecretBox())
+        assertEquals(DeliveryOrder.WIFI_FIRST, store.delivery.first())
+        store.saveDelivery(DeliveryOrder.PHONE_ONLY)
+        assertEquals(DeliveryOrder.PHONE_ONLY, store.delivery.first())
+    }
+
+    @Test
+    fun wifiPasswordsAreStoredOnlyAsCiphertext() = runBlocking {
+        val file = File(tmp.root, "w.preferences_pb")
+        val token = JvmSecretBox()
+        val wifi = JvmSecretBox()
+        var now = 1000L
+        val store = SettingsStore(dataStore(file), token, wifi, clock = { now++ })
+        store.addWifiNetwork("home-net", "fake-wifi-pass-1")
+        store.addWifiNetwork("open-cafe", "")
+
+        assertFalse("plain password on disk", rawText(file).contains("fake-wifi-pass-1"))
+        assertEquals(1, wifi.seals) // the open network has no password to seal
+        assertEquals(0, token.seals)
+        val pending = store.pendingNetworks("C0:A1")
+        assertEquals(listOf("home-net" to "fake-wifi-pass-1", "open-cafe" to ""), pending.map { it.ssid to it.password })
+        assertEquals(listOf(false, true), store.wifiNetworks.first().map { it.open })
+    }
+
+    @Test
+    fun invalidNetworksAreNotAdded() = runBlocking {
+        val store = SettingsStore(dataStore(File(tmp.root, "i.preferences_pb")), JvmSecretBox())
+        for ((ssid, pass) in listOf("" to "", "s".repeat(33) to "", "home" to "p".repeat(7), "home" to "p".repeat(65))) {
+            assertThrows(IllegalArgumentException::class.java) { runBlocking { store.addWifiNetwork(ssid, pass) } }
+        }
+        store.addWifiNetwork("s".repeat(32), "p".repeat(64))
+        store.addWifiNetwork("x", "p".repeat(8))
+        assertEquals(2, store.wifiNetworks.first().size)
+    }
+
+    @Test
+    fun networkStatesPerCoinReplaceAndRemove() = runBlocking {
+        var now = 1000L
+        val store = SettingsStore(dataStore(File(tmp.root, "n.preferences_pb")), JvmSecretBox(), clock = { now++ })
+        store.addWifiNetwork("home", "fake-pass-1")
+        store.addWifiNetwork("guest", "")
+        val (home, guest) = store.pendingNetworks("A")
+
+        store.networkResult("A", home, null)
+        store.networkResult("A", guest, ErrorCode.INVALID_VALUE)
+        val infos = store.wifiNetworks.first().associateBy { it.ssid }
+        assertEquals(WifiNetworkState.SENT, infos.getValue("home").state)
+        assertEquals(WifiNetworkState.REFUSED, infos.getValue("guest").state)
+        assertEquals(ErrorCode.INVALID_VALUE, infos.getValue("guest").errorCode)
+        assertTrue("nothing left for coin A", store.pendingNetworks("A").isEmpty())
+        assertEquals(2, store.pendingNetworks("B").size)
+
+        // The same SSID again replaces the entry, newest last, waiting again; a result for the
+        // replaced version is ignored.
+        store.addWifiNetwork("home", "fake-pass-2")
+        store.networkResult("A", home, ErrorCode.INVALID_VALUE)
+        val list = store.wifiNetworks.first()
+        assertEquals(listOf("guest", "home"), list.map { it.ssid })
+        assertEquals(WifiNetworkState.WAITING, list.last().state)
+        assertEquals(listOf("fake-pass-2"), store.pendingNetworks("A").map { it.password })
+
+        store.removeWifiNetwork(list.first().id)
+        assertEquals(listOf("home"), store.wifiNetworks.first().map { it.ssid })
+    }
+
+    @Test
+    fun undecryptableWifiPasswordIsFlaggedAndNotSent() = runBlocking {
+        val file = File(tmp.root, "u.preferences_pb")
+        SettingsStore(dataStore(file), JvmSecretBox()).addWifiNetwork("home", "fake-pass-1")
+        scopes.removeAt(0).cancel()
+
+        val store = SettingsStore(dataStore(file), JvmSecretBox())
+        assertFalse(store.wifiNetworks.first().single().passwordReadable)
+        assertTrue(store.pendingNetworks("A").isEmpty())
     }
 
     @Test
