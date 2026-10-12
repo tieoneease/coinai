@@ -80,6 +80,7 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 - **CRC-32:** IEEE 802.3, the same as zlib's `crc32`, taken over the whole `.ogg` file.
 - **Which messages are unsolicited:** `STATUS` (also whenever battery, charging, recording or the pending count changes) and `CLIP_STARTED` (a recording began during the connection, or Wi-Fi gave a clip back; the app may `GET` it at once, and a recording one arrives as it is recorded). Everything else answers a request.
 - **Answers:** `HELLO` → `STATUS`. `LIST` → one or more `LIST_RESULT`. `GET` → data packets, then `CLIP_ENDED`. A matching `ACK` → `STATUS` with the new pending count; a refused one → `ERROR`. A malformed or invalid request → `ERROR`.
+- **Requests are handled in order,** one at a time: answers (and `ERROR`s) come back in the order of the requests they answer. `WIFI_SET` and `CFG_SET` get no answer when accepted, so the app follows one with `LIST` and reads an `ERROR` for it that arrives before the `LIST_RESULT` as its refusal.
 - **A new `GET` replaces a running one;** the replaced transfer gets no `CLIP_ENDED`.
 - **A clip discarded while it streams** (the user held BOOT during the recording) is deleted on the device. The transfer stops with `ERROR` code 1 for that clip instead of `CLIP_ENDED`, and the clip leaves the pending count; the app drops what it received.
 - **Clip ids:** `u16`, increasing, kept across reboots in NVS. They wrap after 65535.
