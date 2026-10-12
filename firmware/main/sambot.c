@@ -138,7 +138,7 @@ static int read_body_alloc(esp_http_client_handle_t h, size_t max, char **out)
     int64_t deadline = esp_timer_get_time() + 20 * 1000000LL;
     for (;;) {
         if (total + 1 == cap) {
-            if (cap > max) {
+            if (cap >= max) {
                 free(buf);
                 return -2;
             }
