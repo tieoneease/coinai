@@ -73,6 +73,26 @@
     },
     {
       "direction": "app_to_device",
+      "type": "CFG_SET",
+      "type_code": 6,
+      "fields": {
+        "key": "utc_offset_min",
+        "value": -300
+      },
+      "hex": "06030005d4fe"
+    },
+    {
+      "direction": "app_to_device",
+      "type": "CFG_SET",
+      "type_code": 6,
+      "fields": {
+        "key": "delivery",
+        "value": 1
+      },
+      "hex": "060300060100"
+    },
+    {
+      "direction": "app_to_device",
       "type": "REPLY",
       "type_code": 7,
       "fields": {

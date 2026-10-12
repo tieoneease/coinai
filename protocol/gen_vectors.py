@@ -15,7 +15,8 @@ TYPES = {
     "HELLO": 0x01, "LIST": 0x02, "GET": 0x03, "ACK": 0x04, "WIFI_SET": 0x05, "CFG_SET": 0x06, "REPLY": 0x07,
     "STATUS": 0x81, "CLIP_STARTED": 0x82, "CLIP_ENDED": 0x83, "LIST_RESULT": 0x84, "ERROR": 0x85,
 }
-CFG_KEYS = {"reply_wait_s": (0x01, "<H"), "brightness": (0x02, "<B"), "idle_timeout_s": (0x03, "<H"), "off_after_h": (0x04, "<H")}
+CFG_KEYS = {"reply_wait_s": (0x01, "<H"), "brightness": (0x02, "<B"), "idle_timeout_s": (0x03, "<H"), "off_after_h": (0x04, "<H"),
+            "utc_offset_min": (0x05, "<h"), "delivery": (0x06, "<H")}
 REPLY_STATES = {"transcribing": 0, "thinking": 1, "done": 2, "failed": 3}
 
 
@@ -75,6 +76,8 @@ CASES = [
     ("app_to_device", "WIFI_SET", {"ssid": "home", "password": "secret pass"}),
     ("app_to_device", "CFG_SET", {"key": "reply_wait_s", "value": 45}),
     ("app_to_device", "CFG_SET", {"key": "brightness", "value": 200}),
+    ("app_to_device", "CFG_SET", {"key": "utc_offset_min", "value": -300}),
+    ("app_to_device", "CFG_SET", {"key": "delivery", "value": 1}),
     ("app_to_device", "REPLY", {"clip": 7, "state": "thinking", "text": ""}),
     ("app_to_device", "REPLY", {"clip": 7, "state": "done", "text": "Got it \u2014 added to your list."}),
     ("device_to_app", "STATUS", {"battery_pct": 87, "charging": 1, "usb_power": 1, "recording": 0, "pending": 2, "fw_version": "0.1.0"}),

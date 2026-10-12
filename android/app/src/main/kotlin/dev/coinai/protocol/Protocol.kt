@@ -80,7 +80,9 @@ enum class CfgKey(val code: Int, val width: Int, val signed: Boolean = false, va
     IDLE_TIMEOUT_S(0x03, 2),
     OFF_AFTER_H(0x04, 2),
     /** Local time minus UTC in minutes (PROTOCOL.md rule 8); i16 on the wire. */
-    UTC_OFFSET_MIN(0x05, 2, signed = true, range = -720..840);
+    UTC_OFFSET_MIN(0x05, 2, signed = true, range = -720..840),
+    /** Delivery order (PROTOCOL.md "Wi-Fi delivery"): 0 Wi-Fi first, 1 phone first, 2 phone only. */
+    DELIVERY(0x06, 2);
 
     companion object {
         fun fromCode(code: Int): CfgKey =
