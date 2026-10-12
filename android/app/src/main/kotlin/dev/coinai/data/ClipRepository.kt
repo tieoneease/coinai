@@ -46,6 +46,8 @@ class ClipRepository(
 
     override suspend fun latest(device: String, clip: Int): TransferRecord? = dao.latest(device, clip)?.toTransfer()
 
+    override suspend fun unfinished(device: String): List<Int> = dao.receivingClipIds(device)
+
     override suspend fun beginTransfer(device: String, clip: Int): TransferRecord = db.withWriteTransaction {
         val existing = dao.latest(device, clip)
         if (existing != null && existing.state == ClipState.RECEIVING) {

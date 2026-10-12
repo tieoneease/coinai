@@ -32,6 +32,9 @@ class MemoryClips(private val root: File) : ClipStore, ProcessingStore {
     override suspend fun latest(device: String, clip: Int) =
         rows.values.filter { it.device == device && it.clipId == clip }.maxByOrNull { it.id }?.toTransfer()
 
+    override suspend fun unfinished(device: String) =
+        rows.values.filter { it.device == device && it.state == ClipState.RECEIVING }.sortedBy { it.id }.map { it.clipId }.distinct()
+
     override suspend fun beginTransfer(device: String, clip: Int): TransferRecord {
         val existing = rows.values.filter { it.device == device && it.clipId == clip }.maxByOrNull { it.id }
         if (existing != null && existing.state == ClipState.RECEIVING) return existing.toTransfer()

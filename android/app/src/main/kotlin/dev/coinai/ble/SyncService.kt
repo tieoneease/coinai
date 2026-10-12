@@ -15,6 +15,7 @@ import dev.coinai.sync.CoinClock
 import dev.coinai.sync.LinkException
 import dev.coinai.sync.ReplyWindow
 import dev.coinai.sync.SessionResult
+import dev.coinai.sync.followDelivery
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +35,9 @@ import java.util.TimeZone
  * [dev.coinai.sync.SyncEngine] session, hold the link through the reply window forwarding
  * `REPLY`s (PROTOCOL.md rule 7), disconnect, stop. Started by [CoinPresenceService]. A time zone
  * change during the visit is sent to the coin at once (rule 8); the engine sends the offset at the
- * start of every session anyway.
+ * start of every session anyway. The delivery order goes out the same way: the engine sends it
+ * after `HELLO` and on change during the session, and this service on change during the reply
+ * window.
  *
  * Compiles; not yet run (no firmware BLE side, no phone in this task).
  */
@@ -109,7 +112,16 @@ class SyncService : Service() {
             val result = app.syncEngine().runSession(link)
             app.log("session with $address: ${result.outcome}, received ${result.received.size}, acked ${result.acked}")
             if (result.outcome == SessionResult.Outcome.COMPLETE && result.received.isNotEmpty()) {
-                ReplyWindow(log = app::log).hold(link, result.received.map { it.clip }.toSet(), replies)
+                // The link stays up for the reply window: a delivery order changed now still
+                // reaches the coin at once, as during the session.
+                val follower = result.delivery?.let { sent ->
+                    scope.launch { followDelivery(link, app.settings.delivery, sent, log = { app.log("$address: $it") }) }
+                }
+                try {
+                    ReplyWindow(log = app::log).hold(link, result.received.map { it.clip }.toSet(), replies)
+                } finally {
+                    follower?.cancel()
+                }
             }
         } finally {
             collector.cancel()

@@ -27,6 +27,11 @@ data class SyncConfig(
     val stallTimeout: Duration = 10.seconds,
     /** Resume `GET`s per clip per session after gaps or stalls before giving up until next session. */
     val maxResumes: Int = 3,
+    /**
+     * `ERROR` 4 (busy) on `GET`: the clip goes to the back of the queue and is asked for again up
+     * to [maxBusyRetries] times, after [busyRetryDelay]. A clip the coin is sending over Wi-Fi
+     * stays busy; it is skipped until the coin offers it back with `CLIP_STARTED`.
+     */
     val busyRetryDelay: Duration = 500.milliseconds,
     val maxBusyRetries: Int = 5,
     /** Sync the part file and record progress every this many new bytes. */
@@ -53,16 +58,25 @@ data class SessionResult(
     /** Clips still on the coin that this session did not finish. */
     val unfinished: List<Int>,
     val error: String? = null,
+    /** The delivery order the coin last got in this session, if any (see [followDelivery]). */
+    val delivery: DeliveryOrder? = null,
 ) {
     enum class Outcome { COMPLETE, DISCONNECTED, FAILED }
 }
 
 /**
  * Runs PROTOCOL.md sessions against a [CoinLink]: `HELLO` → `STATUS`, `CFG_SET utc_offset_min`
- * (rule 8), `LIST` → `LIST_RESULT` (possibly several messages), then for each clip not yet received
+ * (rule 8) and `CFG_SET delivery`, then `WIFI_SET` for networks the coin has not had yet,
+ * `LIST` → `LIST_RESULT` (possibly several messages), then for each clip not yet received
  * a `GET` from the stored resume offset, reassembly, size and CRC-32 check, a durable commit, and
  * only then `ACK`. A clip the coin no longer has (`ERROR` 1, for example discarded while it
  * streams) is dropped without a trace.
+ *
+ * A clip the coin is sending over Wi-Fi is not listed, and a `GET` of it gets `ERROR` 4 (busy):
+ * it is skipped and the session goes on with the rest. It either disappears (a later `GET` gets
+ * `ERROR` 1 and the clip is dropped) or the coin offers it back with `CLIP_STARTED`, which queues
+ * it again. Clips with an unfinished transfer that `LIST` leaves out are asked for at the end, so
+ * a partial copy of a clip delivered over Wi-Fi meets its `ERROR` 1.
  */
 class SyncEngine(
     private val store: ClipStore,
@@ -73,6 +87,8 @@ class SyncEngine(
     private val io: CoroutineContext = Dispatchers.IO,
     /** The phone's time zone, read at the start of each session (PROTOCOL.md rule 8). */
     private val timeZone: () -> TimeZone = TimeZone::getDefault,
+    /** Delivery order and Wi-Fi networks for the coin. */
+    private val settings: CoinSettings = CoinSettings.NONE,
 ) {
     suspend fun runSession(link: CoinLink): SessionResult = coroutineScope {
         val inbox = Channel<Event>(Channel.UNLIMITED)
@@ -83,7 +99,7 @@ class SyncEngine(
             inbox.send(Event.Lost)
         }
         try {
-            Session(link, inbox).run()
+            Session(link, inbox, this).run()
         } finally {
             pump.cancel()
             watch.cancel()
@@ -98,7 +114,11 @@ class SyncEngine(
     private class LinkLost : Exception()
     private class SessionFailure(message: String) : Exception(message)
 
-    private inner class Session(private val link: CoinLink, private val inbox: Channel<Event>) {
+    private inner class Session(
+        private val link: CoinLink,
+        private val inbox: Channel<Event>,
+        private val scope: kotlinx.coroutines.CoroutineScope,
+    ) {
         private val device = link.deviceAddress
         private var status: CtrlMessage.Status? = null
         private val received = mutableListOf<ReceivedClip>()
@@ -112,6 +132,13 @@ class SyncEngine(
         private val fetchAsNew = mutableSetOf<Int>()
         /** Clips the coin no longer has (`ERROR` 1 on `GET`): dropped, not unfinished. */
         private val gone = mutableSetOf<Int>()
+        /** `GET`s answered busy, per clip; a clip in [busyRetry] waits [SyncConfig.busyRetryDelay] first. */
+        private val busyCount = mutableMapOf<Int, Int>()
+        private val busyRetry = mutableSetOf<Int>()
+        /** `ERROR` codes for `WIFI_SET`, in arrival order. */
+        private val wifiErrors = mutableListOf<Int>()
+        @Volatile private var deliverySent: DeliveryOrder? = null
+        private var deliveryFollower: kotlinx.coroutines.Job? = null
         /** ACKs sent whose answer (`STATUS`, or `ERROR` when refused) has not arrived yet. */
         private var unansweredAcks = 0
         private var current: Transfer? = null
@@ -120,10 +147,17 @@ class SyncEngine(
             val outcome = try {
                 send(CtrlMessage.Hello(phoneUtcMs = clock()))
                 sendUtcOffset()
+                sendDelivery()
                 awaitStatus()
-                for (entry in list()) enqueue(entry.clip)
+                val listed = sendNetworks() ?: list()
+                for (entry in listed) enqueue(entry.clip)
+                // Unfinished transfers the coin did not list: gone (delivered over Wi-Fi, or
+                // discarded) answers ERROR 1 and is dropped; still busy is skipped; back is resumed.
+                for (clip in store.unfinished(device)) enqueue(clip)
                 while (queue.isNotEmpty()) {
-                    visit(queue.removeFirst())
+                    val clip = queue.removeFirst()
+                    if (busyRetry.remove(clip)) delay(config.busyRetryDelay)
+                    visit(clip)
                     // Before ending the session, wait for the ACKs' answers: a refused re-ACK
                     // makes the clip a new fetch (see aside()), and the STATUS answering the last
                     // ACK carries the pending count the app shows.
@@ -138,12 +172,13 @@ class SyncEngine(
                 if (link.state.value == LinkState.DISCONNECTED) SessionResult.Outcome.DISCONNECTED to "link lost"
                 else SessionResult.Outcome.FAILED to (e.message ?: e.toString())
             } finally {
+                deliveryFollower?.cancel()
                 current?.let { saveAndClose(it) }
                 current = null
             }
             outcome.second?.let { log("session ended: $it") }
             val unfinished = (queue + visited).filter { it !in acked && it !in gone }.distinct()
-            return SessionResult(outcome.first, status, received.toList(), acked.toList(), unfinished, outcome.second)
+            return SessionResult(outcome.first, status, received.toList(), acked.toList(), unfinished, outcome.second, deliverySent)
         }
 
         // Requests
@@ -171,6 +206,53 @@ class SyncEngine(
             val message = CoinClock.offsetMessage(clock(), zone)
             if (message == null) log("UTC offset of ${zone.id} is outside the protocol's range; not sent")
             else send(message)
+        }
+
+        /**
+         * `CFG_SET delivery` after `HELLO` in every session, like the UTC offset, then again
+         * whenever the setting changes while the session runs.
+         */
+        private suspend fun sendDelivery() {
+            val flow = settings.delivery ?: return
+            val order = flow.first()
+            send(order.message())
+            deliverySent = order
+            deliveryFollower = scope.launch {
+                followDelivery(link, flow, order, onSent = { deliverySent = it }, log = ::log)
+            }
+        }
+
+        /**
+         * `WIFI_SET` for each network the coin has not had, one at a time. The coin answers an
+         * accepted `WIFI_SET` with nothing and a refused one with an `ERROR` that names no clip;
+         * it handles requests in order, so a `LIST` after each is the barrier: an `ERROR` for
+         * `WIFI_SET` before its `LIST_RESULT` is the refusal. Returns the last `LIST`'s entries,
+         * or null when nothing was sent.
+         */
+        private suspend fun sendNetworks(): List<dev.coinai.protocol.ClipEntry>? {
+            val networks = settings.pendingNetworks(device)
+            if (networks.isEmpty()) return null
+            // PROTOCOL.md: refused on any link that is not encrypted and authenticated, which a
+            // bench-mode coin reports with this suffix. Keep them for a paired session.
+            if (status?.fwVersion?.endsWith("-bench") == true) {
+                log("bench-mode link: Wi-Fi networks kept for the next paired session")
+                return null
+            }
+            var entries: List<dev.coinai.protocol.ClipEntry>? = null
+            for (network in networks) {
+                if (CoinWifi.error(network.ssid, network.password) != null) {
+                    // Checked when added; never sent invalid, so refused here as the coin would.
+                    settings.networkResult(device, network, ErrorCode.INVALID_VALUE)
+                    continue
+                }
+                val before = wifiErrors.size
+                send(network.message())
+                entries = list()
+                val error = wifiErrors.getOrNull(before)
+                log("Wi-Fi network ${network.ssid}: ${if (error == null) "sent" else "refused with error $error"}")
+                settings.networkResult(device, network, error)
+            }
+            return entries
         }
 
         private suspend fun ack(clip: Int, crc32: Long) {
@@ -263,7 +345,6 @@ class SyncEngine(
         private inner class Transfer(val record: TransferRecord, val assembler: ClipAssembler) {
             var durable = assembler.contiguous
             var resumes = 0
-            var busy = 0
             var restartedFromZero = false
         }
 
@@ -362,17 +443,38 @@ class SyncEngine(
                 restartFromZero(t)
                 false
             }
-            ErrorCode.BUSY -> if (t.busy++ < config.maxBusyRetries) {
-                delay(config.busyRetryDelay)
-                send(CtrlMessage.Get(t.record.clip, t.assembler.contiguous))
-                false
-            } else {
-                giveUp(t, "coin busy")
+            ErrorCode.BUSY -> {
+                busy(t)
                 true
             }
             else -> {
                 giveUp(t, "GET failed with error ${m.code}")
                 true
+            }
+        }
+
+        /**
+         * `ERROR` 4 on `GET`, usually a clip the coin is sending over Wi-Fi: set the clip aside
+         * and go on with the rest. It goes to the back of the queue for another try, up to
+         * [SyncConfig.maxBusyRetries]; after that only a `CLIP_STARTED` brings it back this session.
+         */
+        private suspend fun busy(t: Transfer) {
+            val clip = t.record.clip
+            val count = (busyCount[clip] ?: 0) + 1
+            busyCount[clip] = count
+            if (t.assembler.contiguous == 0L && t.record.durableBytes == 0L) {
+                // Nothing received: no row, so a clip Wi-Fi delivers leaves no trace in the app.
+                withContext(io) { t.assembler.close() }
+                current = null
+                store.discardTransfer(t.record)
+            } else {
+                giveUp(t, "coin busy; progress kept")
+            }
+            if (count <= config.maxBusyRetries) {
+                if (clip !in queue) queue.addLast(clip)
+                busyRetry += clip
+            } else {
+                log("clip $clip: busy (sending over Wi-Fi?); skipped until the coin offers it again")
             }
         }
 
@@ -421,15 +523,18 @@ class SyncEngine(
             val msg = (inbound as? Inbound.Ctrl)?.message ?: return // data for no current transfer
             when (msg) {
                 is CtrlMessage.Status -> onStatus(msg)
-                // Unsolicited: a recording began during the connection. It is fetched in this
-                // session, after the clips already queued. CLIP_ENDED only ever ends a GET stream,
-                // so one arriving here (a late end of a finished transfer) is ignored below.
+                // Unsolicited: a recording began during the connection, or Wi-Fi gave a clip back
+                // (possibly complete, possibly one this session skipped as busy). It is fetched in
+                // this session, after the clips already queued; visit() re-ACKs instead when the
+                // app already has it complete. CLIP_ENDED only ever ends a GET stream, so one
+                // arriving here (a late end of a finished transfer) is ignored below.
                 is CtrlMessage.ClipStarted -> {
                     startTimes[msg.clip] = msg.startUtcMs
-                    enqueue(msg.clip)
+                    offered(msg.clip)
                 }
                 is CtrlMessage.Error -> {
                     log("ERROR for ${typeName(msg.requestType)}: code ${msg.code}, clip ${msg.clip}")
+                    if (msg.requestType == MessageType.WIFI_SET) wifiErrors += msg.code
                     if (msg.requestType == MessageType.ACK) unansweredAcks = (unansweredAcks - 1).coerceAtLeast(0)
                     // A refused re-ACK means the stored copy is not the clip the coin holds under
                     // this id (the id wrapped): fetch it as a new clip. BUSY is no refusal.
@@ -442,6 +547,17 @@ class SyncEngine(
                 is CtrlMessage.Unknown -> log("ignoring unknown message type 0x%02x".format(msg.type))
                 else -> log("ignoring unexpected ${msg::class.simpleName}")
             }
+        }
+
+        /** Queues an offered clip again, even one visited this session, unless it is queued or streaming. */
+        private fun offered(clip: Int) {
+            busyCount -= clip
+            busyRetry -= clip
+            if (clip in queue || current?.record?.clip == clip) return
+            visited -= clip
+            gone -= clip
+            acked -= clip // a refused (busy) ACK: visit() sends it again
+            queue.addLast(clip)
         }
 
         private fun onStatus(s: CtrlMessage.Status) {

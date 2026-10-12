@@ -7,17 +7,21 @@ Kotlin + Jetpack Compose app that receives clips from the coin over BLE and forw
 | Package | Android? | What |
 |---|---|---|
 | `dev.coinai.protocol` | no | Codec for PROTOCOL.md v1 (every `ctrl` TLV message, `data` packets). Unknown TLV types decode to `CtrlMessage.Unknown`. |
-| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `CFG_SET utc_offset_min`, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`; a clip the coin discards mid-stream is dropped), `CoinClock` (rule 8: the phone's UTC offset), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY`, the transcript while `thinking`, while the coin waits). |
+| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `CFG_SET utc_offset_min` and `delivery`, queued `WIFI_SET`s, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`; a clip the coin discards mid-stream is dropped; a clip the coin is sending over Wi-Fi (`ERROR` 4) is skipped until it is offered back with `CLIP_STARTED`), `CoinClock` (rule 8: the phone's UTC offset), `CoinSettings` (delivery order, `WIFI_SET` limits in UTF-8 bytes), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY`, the transcript while `thinking`, while the coin waits). |
 | `dev.coinai.clips` | no | `ClipProcessor` (transcribe, voiced/blank gate, at-most-once prompt, reply), clip states, `PlainText` (markdown removal; folding to the coin's character set, printable ASCII and newline, with the coin's own mappings). |
 | `dev.coinai.sambot` | no | `SambotClient` (`health`, `transcribe`, `ask`) after SamBot's reference client. |
 | `dev.coinai.data` | yes | Room 3 clip table, `ClipRepository` (implements `ClipStore` and `ProcessingStore`; audio in `filesDir/clips/<device>/`). |
-| `dev.coinai.settings` | yes | DataStore settings; the SamBot token as AES-256-GCM ciphertext + IV, key in the Android Keystore (`KeystoreSecretBox`). A plain token from the first version is encrypted on first read. |
+| `dev.coinai.settings` | yes | DataStore settings; the SamBot token as AES-256-GCM ciphertext + IV, key in the Android Keystore (`KeystoreSecretBox`). A plain token from the first version is encrypted on first read. The coin's Wi-Fi networks (passwords sealed the same way, own key) with their state per coin, and the delivery order. |
 | `dev.coinai.ble` | yes | `CoinBleManager` (Nordic Android-BLE-Library), CDM pairing and presence (`CoinPairing`, `CoinPresenceService`), `SyncService` (connectedDevice FGS for one visit). |
 | `dev.coinai.app` | yes | `CoinaiApp` (process-wide objects), `ClipWorker` (WorkManager), notifications. |
 
 Clip states: `RECEIVING → RECEIVED → TRANSCRIBED → PROMPTED → REPLIED`, side exits `NO_SPEECH`, `UNCERTAIN`, `FAILED`. A clip is prompted at most once: `TRANSCRIBED → PROMPTED` commits before `POST /prompt`, and a prompt whose outcome is unknown becomes `UNCERTAIN` and is only sent again by the user ("Resend").
 
 Open protocol questions are marked `// PROTOCOL-Q:` in the code; there are none at present.
+
+Settings on the main screen: SamBot, **Delivery** (Wi-Fi first, the default / phone first / phone only; `CFG_SET` key `0x06` after `HELLO` in every session and at once when changed during a visit), **Coin Wi-Fi** (add a network or an open one, list, remove from the app's list; a new network waits for the next session, goes out with `WIFI_SET` after `STATUS`, and shows as sent or refused; the coin keeps the 4 newest and cannot forget one over BLE), Processing.
+
+`WIFI_SET` has no answer when accepted, and its `ERROR` names no clip, so the engine sends one at a time with a `LIST` after each as the barrier (the coin handles requests in order). Unfinished transfers that `LIST` leaves out are asked for at the end of a session, so one the coin delivered over Wi-Fi gets `ERROR` 1 and is dropped.
 
 `SyncService` sends `utc_offset_min` again when the time zone changes during a visit (a context-registered `ACTION_TIMEZONE_CHANGED` receiver); between visits the change reaches the coin with the next session's `HELLO`.
 

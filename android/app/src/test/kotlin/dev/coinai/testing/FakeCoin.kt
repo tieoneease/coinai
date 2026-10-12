@@ -57,8 +57,22 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     /** Settings from CFG_SET, as the coin stores them. */
     val settings = mutableMapOf<CfgKey, Int>()
 
+    /** Networks from WIFI_SET, newest first, at most 4; the same SSID again replaces its entry. */
+    val wifiNetworks = mutableListOf<Pair<String, String>>()
+    /** SSIDs the coin refuses with ERROR 5 even when valid (for example a full flash). */
+    var refuseWifi: Set<String> = emptySet()
+
+    /**
+     * Clips the coin is sending over Wi-Fi: not listed, not counted, no CLIP_STARTED, and GET or
+     * ACK of them answers ERROR 4. [giveBack] and [deliverOverWifi] end the claim.
+     */
+    val wifiClaimed = mutableSetOf<Int>()
+    /** Clips that Wi-Fi claims right after a LIST has listed them. */
+    var claimAfterList: Set<Int> = emptySet()
+
     var listChunk = Protocol.MAX_LIST_ENTRIES
     var answerHello = true
+    var fwVersion = "0.1.0"
     var packetInterval: Duration = 5.milliseconds
 
     // Faults. Packet indices count packets within one GET stream, from 0.
@@ -94,6 +108,20 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     fun addClip(id: Int, bytes: ByteArray, complete: Boolean = true, durationMs: Long = 3000, voicedMs: Long = 2000, startUtcMs: Long = 0): Clip =
         Clip(id, bytes, complete, durationMs, voicedMs, startUtcMs).also { clips[id] = it }
 
+    /** Wi-Fi failed before SamBot was prompted: the clip is the phone's again, offered with CLIP_STARTED. */
+    fun giveBack(id: Int) {
+        wifiClaimed -= id
+        val clip = clips.getValue(id)
+        emit(CtrlMessage.ClipStarted(id, Protocol.CODEC_OGG_OPUS, 16_000, clip.startUtcMs))
+        emitStatus()
+    }
+
+    /** SamBot took the clip over Wi-Fi: the coin deletes it. */
+    fun deliverOverWifi(id: Int) {
+        wifiClaimed -= id
+        clips.remove(id)
+    }
+
     fun reconnect() {
         packetsThisConnection = 0
         state.value = LinkState.READY
@@ -111,12 +139,31 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
         when (m) {
             is CtrlMessage.Hello -> if (answerHello) emitStatus()
             is CtrlMessage.CfgSet -> settings[m.key] = m.value
+            is CtrlMessage.WifiSet -> {
+                val s = m.ssid.toByteArray().size
+                val p = m.password.toByteArray().size
+                if (s !in 1..32 || (p != 0 && p !in 8..64) || m.ssid in refuseWifi) {
+                    emit(CtrlMessage.Error(MessageType.WIFI_SET, ErrorCode.INVALID_VALUE, Protocol.NO_CLIP))
+                } else {
+                    wifiNetworks.removeAll { it.first == m.ssid }
+                    wifiNetworks.add(0, m.ssid to m.password)
+                    while (wifiNetworks.size > 4) wifiNetworks.removeAt(wifiNetworks.lastIndex)
+                }
+            }
             CtrlMessage.ListClips -> {
-                val entries = clips.values.map { ClipEntry(it.id, it.size, it.complete) }
+                val entries = clips.values.filter { it.id !in wifiClaimed }.map { ClipEntry(it.id, it.size, it.complete) }
                 val chunks = entries.chunked(listChunk).ifEmpty { listOf(emptyList()) }
                 chunks.forEachIndexed { i, chunk -> emit(CtrlMessage.ListResult(more = i < chunks.lastIndex, entries = chunk)) }
+                wifiClaimed += claimAfterList.filter { it in clips }
+                claimAfterList = emptySet()
             }
-            is CtrlMessage.Get -> startStream(m)
+            is CtrlMessage.Get -> if (m.clip in wifiClaimed) {
+                stream?.cancel()
+                emit(CtrlMessage.Error(MessageType.GET, ErrorCode.BUSY, m.clip))
+            } else {
+                startStream(m)
+            }
+            is CtrlMessage.Ack if m.clip in wifiClaimed -> emit(CtrlMessage.Error(MessageType.ACK, ErrorCode.BUSY, m.clip))
             is CtrlMessage.Ack -> {
                 if (disconnectOnAck) {
                     disconnectOnAck = false
@@ -138,7 +185,7 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     }
 
     private fun emitStatus() = emit(
-        CtrlMessage.Status(87, charging = false, usbPower = false, recording = clips.values.any { !it.complete }, pending = clips.size, fwVersion = "0.1.0"),
+        CtrlMessage.Status(87, charging = false, usbPower = false, recording = clips.values.any { !it.complete }, pending = clips.count { it.key !in wifiClaimed }, fwVersion = fwVersion),
     )
 
     fun emit(message: CtrlMessage) {
