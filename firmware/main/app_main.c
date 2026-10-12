@@ -526,7 +526,16 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "BLE init failed");
     }
+    pmic_status_t ps;  // Wi-Fi's battery check, before the status task's first reading
+    if (pmic_ok && pmic_read_status(&ps) == ESP_OK) {
+        net_note_power(ps.battery_present ? ps.vbat_mv : 0, ps.vbus_good);
+    } else {
+        net_note_power(0, false);  // no reading: as without a battery
+    }
     if (net_init() == ESP_OK) {
+        // A PWR wake records before net_init: Wi-Fi first claims that clip now, before a phone
+        // can connect and start fetching it.
+        net_prepare(audio_recording_clip());
         net_kick(0, false);  // clips left from before go now if a known network answers
     } else {
         ESP_LOGE(TAG, "Wi-Fi delivery init failed");

@@ -285,6 +285,11 @@ static void tx_stop(void)
 static void handle_get(uint16_t clip, uint32_t offset)
 {
     tx_stop();  // a new GET replaces the current one
+    if (claimed(clip)) {
+        // Before the lookup: while Wi-Fi prompts, the clip is tombstoned and would look gone.
+        send_error(MSG_GET, ERR_BUSY, clip);
+        return;
+    }
     clip_meta_t meta;
     bool complete;
     if (clipstore_get_meta(clip, audio_recording_clip(), &meta, &complete) != ESP_OK) {

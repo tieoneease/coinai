@@ -129,6 +129,8 @@ The reference implementation is `~/.sambot/telegram/src/sambot-client.ts` on the
 - Transcription is retried freely.
 - Each clip is prompted at most once.
 - If the outcome of a `/prompt` call is unknown, such as a timeout after sending, the clip is marked uncertain and offers a manual resend.
+- **Over Wi-Fi from the coin** (D10): the coin writes a tombstone just before `POST /prompt` and deletes the clip once SamBot accepts it. A reset or power loss between the two deletes the clip at the next boot, and an unknown outcome deletes it with "Not sure SamBot got it." on the screen: the coin has no resend, so such a clip is lost rather than sent twice.
+- **Known gap (coin and phone):** if the phone has received a whole clip and the link drops before its `ACK`, the coin keeps that clip from Wi-Fi only until it reboots. After a reboot Wi-Fi may send it while the phone sends its copy too. Rare (a lost link, a reboot and a pending phone copy together); the fix would be the phone confirming a prompted clip by id at the next connection.
 
 **UI (Compose):**
 - Status: battery, last sync, pending clips.

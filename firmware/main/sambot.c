@@ -17,6 +17,7 @@ static const char *TAG = "sambot";
 #define LIVE_WAIT_MS    15000      // GET /events until host_stream_live
 #define TRANSCRIBE_MS   45000      // per network wait while SamBot transcribes
 #define SSE_MAX         (512 * 1024)  // a bigger frame is skipped
+#define TRANSCRIBE_BODY_MAX (256 * 1024)  // the JSON with the transcript: hours of speech
 // History replayed before host_stream_live. Without `tail` SamBot replays the lane's whole
 // transcript (119 MB in 2026-10). `tail=0` would mean live-only but SamBot reads it as everything
 // (`slice(-0)`), so one event it is; anything before host_stream_live is discarded anyway.
@@ -50,6 +51,14 @@ void sambot_abort(void)
 static void *ps_malloc(size_t n)
 {
     return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+void sambot_begin(void)
+{
+    // A transcript can be tens of KB; its JSON copies stay out of the internal RAM Wi-Fi needs.
+    static cJSON_Hooks hooks = {.malloc_fn = ps_malloc, .free_fn = free};
+    cJSON_InitHooks(&hooks);
+    s_abort = false;
 }
 
 static void set_err(sambot_err_t *err, int status, const char *fmt, const char *arg)
@@ -90,6 +99,9 @@ static bool auth_status(int status)
 // Reads a small response body; returns its length (-1 on error).
 static int read_body(esp_http_client_handle_t h, char *buf, size_t len)
 {
+    if (len == 0) {
+        return -1;
+    }
     int total = 0;
     int64_t deadline = esp_timer_get_time() + 20 * 1000000LL;
     while ((size_t)total < len - 1) {
@@ -113,7 +125,58 @@ static int read_body(esp_http_client_handle_t h, char *buf, size_t len)
     return total;
 }
 
+// Reads a response body of up to `max` bytes into a PSRAM buffer the caller frees. Returns its
+// length; -1 on a read error, -2 when it is longer than `max` (*out stays NULL in both cases).
+static int read_body_alloc(esp_http_client_handle_t h, size_t max, char **out)
+{
+    *out = NULL;
+    size_t cap = 4096, total = 0;
+    char *buf = ps_malloc(cap);
+    if (!buf) {
+        return -1;
+    }
+    int64_t deadline = esp_timer_get_time() + 20 * 1000000LL;
+    for (;;) {
+        if (total + 1 == cap) {
+            if (cap > max) {
+                free(buf);
+                return -2;
+            }
+            char *q = heap_caps_realloc(buf, cap * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!q) {
+                free(buf);
+                return -1;
+            }
+            buf = q;
+            cap *= 2;
+        }
+        int n = esp_http_client_read(h, buf + total, cap - 1 - total);
+        if (n == -ESP_ERR_HTTP_EAGAIN) {
+            if (s_abort || esp_timer_get_time() > deadline) {
+                break;
+            }
+            continue;
+        }
+        if (n < 0) {
+            free(buf);
+            return -1;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    if (total > max) {
+        free(buf);
+        return -2;
+    }
+    buf[total] = 0;
+    *out = buf;
+    return (int)total;
+}
+
 // SamBot's {"error": "..."} text, if any.
+
 static void error_detail(const char *body, sambot_err_t *err, int status, const char *what)
 {
     cJSON *j = cJSON_Parse(body);
@@ -141,12 +204,14 @@ static bool write_all(esp_http_client_handle_t h, const char *buf, int len)
     return true;
 }
 
-sambot_rc_t sambot_transcribe(const char *path, char *text, size_t text_len, sambot_progress_t progress, void *ctx,
+sambot_rc_t sambot_transcribe(const char *path, char **text, sambot_progress_t progress, void *ctx,
                               sambot_err_t *err)
 {
-    s_abort = false;
-    text[0] = 0;
+    *text = NULL;
     set_err(err, 0, "", NULL);
+    if (s_abort) {
+        return SAMBOT_ABORTED;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) {
         set_err(err, 0, "clip file missing", NULL);
@@ -200,24 +265,33 @@ sambot_rc_t sambot_transcribe(const char *path, char *text, size_t text_len, sam
         goto out;
     }
     if (esp_http_client_fetch_headers(h) < 0) {
-        set_err(err, 0, "no answer", NULL);
+        set_err(err, 0, s_abort ? "aborted" : "no answer", NULL);
+        rc = s_abort ? SAMBOT_ABORTED : SAMBOT_NET;
         goto out;
     }
     int status = esp_http_client_get_status_code(h);
+    if (status >= 200 && status < 300) {
+        char *body = NULL;
+        int blen = read_body_alloc(h, TRANSCRIBE_BODY_MAX, &body);
+        cJSON *j = blen >= 0 ? cJSON_Parse(body) : NULL;
+        const cJSON *t = j ? cJSON_GetObjectItemCaseSensitive(j, "text") : NULL;
+        if (cJSON_IsString(t) && (*text = ps_malloc(strlen(t->valuestring) + 1)) != NULL) {
+            strcpy(*text, t->valuestring);
+            rc = SAMBOT_OK;
+        } else if (blen == -2) {
+            set_err(err, status, "transcribe: answer too long", NULL);
+            rc = SAMBOT_REFUSED;  // the phone has no such limit
+        } else {
+            set_err(err, status, blen == -1 ? "transcribe: answer cut off" : "transcribe: unexpected answer", NULL);
+        }
+        cJSON_Delete(j);
+        free(body);
+        goto out;
+    }
     int len = read_body(h, buf, 4096);
     if (auth_status(status)) {
         set_err(err, status, "token rejected", NULL);
         rc = SAMBOT_AUTH;
-    } else if (status >= 200 && status < 300 && len >= 0) {
-        cJSON *j = cJSON_Parse(buf);
-        const cJSON *t = j ? cJSON_GetObjectItemCaseSensitive(j, "text") : NULL;
-        if (cJSON_IsString(t)) {
-            snprintf(text, text_len, "%s", t->valuestring);
-            rc = SAMBOT_OK;
-        } else {
-            set_err(err, status, "transcribe: unexpected answer", NULL);
-        }
-        cJSON_Delete(j);
     } else if (status >= 400 && status < 500 && status != 408 && status != 429) {
         error_detail(buf, err, status, "transcribe");
         rc = SAMBOT_REFUSED;
@@ -241,6 +315,7 @@ typedef struct {
     char *data;
     size_t dlen, dcap;
     bool has_data, overflow;
+    bool stopped;  // on_frame returned false
 } sse_t;
 
 static bool grow(char **p, size_t *cap, size_t need)
@@ -293,6 +368,8 @@ static size_t sse_feed(sse_t *s, const char *buf, size_t n, bool (*on_frame)(con
                 if (!on_frame(s->data, ctx)) {
                     s->has_data = s->overflow = false;
                     s->dlen = 0;
+                    s->len = 0;
+                    s->stopped = true;
                     return i + 1;
                 }
             }
@@ -416,6 +493,7 @@ typedef struct {
 static int pump(esp_http_client_handle_t h, sse_t *sse, pump_t *p, int64_t deadline_us,
                 bool (*on_frame)(const char *, void *), void *ctx)
 {
+    sse->stopped = false;
     if (p->rest_len) {
         size_t len = p->rest_len;
         p->rest_len = 0;
@@ -423,6 +501,8 @@ static int pump(esp_http_client_handle_t h, sse_t *sse, pump_t *p, int64_t deadl
         if (used < len) {
             p->rest += used;
             p->rest_len = len - used;
+        }
+        if (sse->stopped) {
             return 1;
         }
     }
@@ -441,13 +521,9 @@ static int pump(esp_http_client_handle_t h, sse_t *sse, pump_t *p, int64_t deadl
         if (used < (size_t)n) {
             p->rest = used;
             p->rest_len = (size_t)n - used;
-            return 1;
         }
-        if (on_frame == frame_turn && ((ask_state_t *)ctx)->settled) {
-            return 1;  // agent_settled was the chunk's last frame
-        }
-        if (on_frame == frame_until_live && ((ask_state_t *)ctx)->live) {
-            return 1;
+        if (sse->stopped) {
+            return 1;  // also when the stopping frame was the chunk's last
         }
     }
     return 0;
@@ -518,9 +594,8 @@ out:
 }
 
 sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, char *reply, size_t reply_len,
-                       bool *settled, void (*prompted)(void *ctx), void *ctx, sambot_err_t *err)
+                       bool *settled, const sambot_ask_hooks_t *hooks, sambot_err_t *err)
 {
-    s_abort = false;
     reply[0] = 0;
     *settled = false;
     set_err(err, 0, "", NULL);
@@ -535,6 +610,10 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
         set_err(err, 0, "out of memory", NULL);
         goto out;
     }
+    if (s_abort) {
+        rc = SAMBOT_ABORTED;
+        goto out;
+    }
     esp_http_client_set_header(h, "Accept", "text/event-stream");
     esp_err_t e = esp_http_client_open(h, 0);
     if (e != ESP_OK) {
@@ -543,6 +622,7 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
     }
     if (esp_http_client_fetch_headers(h) < 0) {
         set_err(err, 0, "events: no answer", NULL);
+        rc = s_abort ? SAMBOT_ABORTED : SAMBOT_NET;
         goto out;
     }
     int status = esp_http_client_get_status_code(h);
@@ -554,7 +634,9 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
             rc = SAMBOT_AUTH;
         } else {
             error_detail(body, err, status, "events");
-            rc = status == 409 ? SAMBOT_REFUSED : SAMBOT_NET;
+            // As for transcribe: a client error lasts (409: the agent is not running); 408, 429,
+            // 5xx and odd 2xx are worth another try.
+            rc = status >= 400 && status < 500 && status != 408 && status != 429 ? SAMBOT_REFUSED : SAMBOT_NET;
         }
         goto out;
     }
@@ -567,12 +649,17 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
         goto out;
     }
     // 2. Only then the prompt.
+    if (s_abort || (hooks && hooks->before_prompt && !hooks->before_prompt(hooks->ctx))) {
+        set_err(err, 0, "aborted before the prompt", NULL);
+        rc = SAMBOT_ABORTED;
+        goto out;
+    }
     rc = post_prompt(text, lane, err);
     if (rc != SAMBOT_OK) {
         goto out;
     }
-    if (prompted) {
-        prompted(ctx);
+    if (hooks && hooks->prompted) {
+        hooks->prompted(hooks->ctx);
     }
     // 3. Assistant text until agent_settled (the stream stays open from before the prompt).
     r = pump(h, &sse, &pb, esp_timer_get_time() + (int64_t)wait_ms * 1000, frame_turn, &st);

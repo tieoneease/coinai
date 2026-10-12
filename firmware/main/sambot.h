@@ -26,19 +26,32 @@ const char *sambot_rc_name(sambot_rc_t rc);
 
 // base_url without a trailing slash, e.g. "https://sambot.exe.xyz".
 void sambot_configure(const char *base_url, const char *token);
-// Makes the call in progress return SAMBOT_ABORTED within about a second; cleared by the next call.
+// Starts one delivery: clears an earlier abort. An abort during the delivery holds until the next.
+void sambot_begin(void);
+// Makes the call in progress (and any later one until sambot_begin) return SAMBOT_ABORTED within
+// about a second, or once a blocking connect gives up.
 void sambot_abort(void);
 
 typedef void (*sambot_progress_t)(uint32_t sent, uint32_t total, void *ctx);
 
-// Uploads the clip file unchanged; `text` gets the transcript (empty: nothing heard).
-sambot_rc_t sambot_transcribe(const char *path, char *text, size_t text_len, sambot_progress_t progress, void *ctx,
+// Uploads the clip file unchanged; `*text` gets the transcript (empty: nothing heard) in PSRAM,
+// for the caller to free (NULL unless SAMBOT_OK).
+sambot_rc_t sambot_transcribe(const char *path, char **text, sambot_progress_t progress, void *ctx,
                               sambot_err_t *err);
 
+typedef struct {
+    // Runs just before POST /prompt, once the event stream is live; false sends nothing
+    // (SAMBOT_ABORTED). The caller marks the clip as sent here (at most once).
+    bool (*before_prompt)(void *ctx);
+    // Runs as soon as SamBot accepted the prompt.
+    void (*prompted)(void *ctx);
+    void *ctx;
+} sambot_ask_hooks_t;
+
 // Sends `text` to `lane` and collects the assistant's reply (markdown) until agent_settled or
-// `wait_ms` after the prompt was accepted. `prompted` runs as soon as SamBot accepted the prompt.
-// SAMBOT_OK means the prompt went out; `*settled` says whether the turn finished in time (the text
-// may be partial otherwise). Failing before the prompt is sent gives SAMBOT_NET, SAMBOT_AUTH or
-// SAMBOT_REFUSED; a prompt with an unknown outcome gives SAMBOT_UNKNOWN.
+// `wait_ms` after the prompt was accepted. SAMBOT_OK means the prompt went out; `*settled` says
+// whether the turn finished in time (the text may be partial otherwise). Failing before the prompt
+// is sent gives SAMBOT_NET, SAMBOT_AUTH, SAMBOT_REFUSED or SAMBOT_ABORTED; a prompt with an
+// unknown outcome gives SAMBOT_UNKNOWN.
 sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, char *reply, size_t reply_len,
-                       bool *settled, void (*prompted)(void *ctx), void *ctx, sambot_err_t *err);
+                       bool *settled, const sambot_ask_hooks_t *hooks, sambot_err_t *err);

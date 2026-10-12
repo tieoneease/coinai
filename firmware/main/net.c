@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include "audio.h"
 #include "clipstore.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_event.h"
@@ -38,7 +39,6 @@ static const char *TAG = "net";
 #define DEFAULT_URL     "https://sambot.exe.xyz"
 #define LANE            "web"   // as the app (ClipProcessor): replies show in SamBot's web lane
 #define TOKEN_MAX       512
-#define TRANSCRIPT_MAX  2048
 #define REPLY_MAX       8192
 #define NO_SPEECH_TEXT  "No speech heard"
 #define UNCERTAIN_TEXT  "Not sure SamBot got it."
@@ -46,7 +46,8 @@ static const char *TAG = "net";
 #define EV_KICK     BIT0
 #define EV_GOT_IP   BIT1
 #define EV_DISCONN  BIT2
-#define EV_IDLE     BIT3  // the task is between deliveries (net_shutdown waits for it)
+#define EV_IDLE     BIT3  // the task is between deliveries
+#define EV_STOPPED  BIT4  // s_stop seen and Wi-Fi off (net_shutdown waits for it)
 
 typedef struct {
     char ssid[33];
@@ -72,6 +73,7 @@ static char s_url[128] = DEFAULT_URL;
 static last_ap_t s_last;
 static volatile uint16_t s_vbat_mv;
 static volatile bool s_usb;
+static volatile bool s_power_known;  // net_note_power ran: until then no Wi-Fi (TX peaks on a weak cell)
 static volatile bool s_stop;
 static volatile bool s_force;
 static volatile uint16_t s_force_clip;
@@ -148,7 +150,7 @@ static bool configured(void)
 
 static bool power_ok(void)
 {
-    return s_usb || s_vbat_mv == 0 || s_vbat_mv >= MIN_VBAT_MV;
+    return s_power_known && (s_usb || s_vbat_mv == 0 || s_vbat_mv >= MIN_VBAT_MV);
 }
 
 static bool phone_connected(void)
@@ -455,8 +457,9 @@ out:
 typedef struct {
     uint16_t clip;
     bool told;      // REPLY 0 went to the screen
+    bool hidden;    // tombstoned: POST /prompt may have gone out
     bool prompted;  // SamBot accepted the prompt: the clip is gone
-    int64_t prompted_us;
+    int64_t prompting_us, prompted_us;
 } job_t;
 
 static void on_progress(uint32_t sent, uint32_t total, void *ctx)
@@ -471,6 +474,21 @@ static void on_progress(uint32_t sent, uint32_t total, void *ctx)
         set_phase(NET_TRANSCRIBING, j->clip);
         ble_note_reply(j->clip, 0, "");  // PROTOCOL.md REPLY 0, as the app sends it
     }
+}
+
+// The prompt goes out at most once (PLAN.md "Duplicates"): the tombstone comes first, so a reset
+// from here on deletes the clip instead of sending it again. Until here a reset loses nothing.
+static bool before_prompt(void *ctx)
+{
+    job_t *j = ctx;
+    if (s_stop) {
+        return false;
+    }
+    clipstore_hide(j->clip);
+    j->hidden = true;
+    j->prompting_us = now_us();
+    set_phase(NET_PROMPTING, j->clip);
+    return true;
 }
 
 static void on_prompted(void *ctx)
@@ -511,11 +529,9 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
     }
     char path[32];
     clipstore_path(id, path, sizeof path);
-    char *text = heap_caps_calloc(1, TRANSCRIPT_MAX, MALLOC_CAP_SPIRAM);
+    char *text = NULL;  // the transcript, from sambot_transcribe
     char *reply = heap_caps_calloc(1, REPLY_MAX, MALLOC_CAP_SPIRAM);
-    if (!text || !reply) {
-        free(text);
-        free(reply);
+    if (!reply) {
         return D_RETRY;
     }
     job_t job = {.clip = id};
@@ -526,7 +542,7 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
     lock();
     s_st.size = meta.size;
     unlock();
-    sambot_rc_t rc = sambot_transcribe(path, text, TRANSCRIPT_MAX, on_progress, &job, &err);
+    sambot_rc_t rc = sambot_transcribe(path, &text, on_progress, &job, &err);
     int64_t t_tr = now_us();
     mem_log("transcribed");
     switch (rc) {
@@ -563,16 +579,14 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
         res = D_DONE;
         goto out;
     }
-    // The prompt goes out at most once (PLAN.md "Duplicates"): tombstone first, so a reset from
-    // here on deletes the clip instead of sending it again.
-    say(id, 1, s);
-    clipstore_hide(id);
-    set_phase(NET_PROMPTING, id);
+    say(id, 1, s);  // what SamBot heard, while the coin waits
     uint32_t wait_ms = settings_get(SET_REPLY_WAIT_S) * 1000u;
     bool settled = false;
-    rc = sambot_ask(s, LANE, wait_ms, reply, REPLY_MAX, &settled, on_prompted, &job, &err);
+    const sambot_ask_hooks_t hooks = {.before_prompt = before_prompt, .prompted = on_prompted, .ctx = &job};
+    rc = sambot_ask(s, LANE, wait_ms, reply, REPLY_MAX, &settled, &hooks, &err);
     int64_t t_end = now_us();
     mem_log("asked");
+    ESP_LOGI(TAG, "net task stack: %u bytes never used", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     switch (rc) {
     case SAMBOT_OK:
         if (settled) {
@@ -583,6 +597,8 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
         ESP_LOGI(TAG, "clip %u delivered over Wi-Fi: join %lld ms, upload+transcribe %lld ms, to prompt %lld ms, "
                       "reply %lld ms%s", id, join_ms, (t_tr - t0) / 1000, (job.prompted_us - t_tr) / 1000,
                  (t_end - job.prompted_us) / 1000, settled ? "" : " (not settled)");
+        ESP_LOGI(TAG, "clip %u: events live after %lld ms, POST /prompt %lld ms", id,
+                 (job.prompting_us - t_tr) / 1000, (job.prompted_us - job.prompting_us) / 1000);
         res = D_DONE;
         break;
     case SAMBOT_UNKNOWN:
@@ -592,18 +608,24 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
         res = D_DONE;
         break;
     case SAMBOT_AUTH:
-        clipstore_unhide(id);
+        if (job.hidden) {
+            clipstore_unhide(id);
+        }
         s_auth_failed = true;
         say(id, 3, "SamBot refused the coin's key. The phone will send this one.");
         res = D_AUTH;
         break;
     case SAMBOT_REFUSED:
-        clipstore_unhide(id);
+        if (job.hidden) {
+            clipstore_unhide(id);
+        }
         fail_text(id, "SamBot: ", &err);
         res = D_SKIP;
         break;
     default:  // not sent: network, or standby
-        clipstore_unhide(id);
+        if (job.hidden) {
+            clipstore_unhide(id);
+        }
         ble_note_reply(id, -1, "");
         res = D_RETRY;
         break;
@@ -612,14 +634,17 @@ out:
     if (res != D_DONE) {
         ESP_LOGW(TAG, "clip %u: %s (HTTP %d: %s)", id, sambot_rc_name(rc), err.status, err.detail);
     }
-    memset(text, 0, TRANSCRIPT_MAX);
-    free(text);
+    if (text) {
+        memset(text, 0, strlen(text));
+        free(text);
+    }
     free(reply);
     return res;
 }
 
-// The oldest stored clip Wi-Fi may take.
-static uint16_t next_clip(void)
+// Claims the oldest stored clip Wi-Fi may take; one the phone holds (fetching, or received and
+// not yet ACKed) is passed over for the next. Returns the claimed clip, or 0.
+static uint16_t claim_next(void)
 {
     static clip_info_t list[64];  // net task only
     int n = clipstore_list(list, 64);
@@ -635,7 +660,9 @@ static uint16_t next_clip(void)
             (meta.voiced_ms != CLIP_VOICED_UNKNOWN && meta.voiced_ms < NO_SPEECH_MS)) {
             continue;
         }
-        return id;
+        if (ble_claim_clip(id)) {
+            return id;
+        }
     }
     return 0;
 }
@@ -664,19 +691,20 @@ static void net_step(void)
     {
         if (s_stop) {
             wifi_off();
+            xEventGroupSetBits(s_ev, EV_STOPPED);
             return;
         }
         bool force = s_force && configured();
         s_force = false;
         uint16_t claim = ble_claimed_clip();
-        if (!claim && (force || eligible(true))) {
-            uint16_t id = force && s_force_clip ? s_force_clip : next_clip();
-            if (id && (force || settings_get(SET_DELIVERY) != DELIVERY_PHONE_FIRST || !phone_connected()) &&
-                ble_claim_clip(id)) {
-                claim = id;
-            } else if (force && id) {
-                ESP_LOGW(TAG, "clip %u: the phone has it (fetching or not yet ACKed)", id);
+        if (!claim && force && s_force_clip) {
+            if (ble_claim_clip(s_force_clip)) {
+                claim = s_force_clip;
+            } else {
+                ESP_LOGW(TAG, "clip %u: the phone has it (fetching or not yet ACKed)", s_force_clip);
             }
+        } else if (!claim && (force || eligible(true))) {
+            claim = claim_next();  // eligible() already left phone first to a connected phone
         }
         if (!claim) {
             if (s_wifi_init && now_us() > s_linger_until_us) {
@@ -685,6 +713,7 @@ static void net_step(void)
             return;
         }
         xEventGroupClearBits(s_ev, EV_IDLE);
+        sambot_begin();  // from here an abort (net_shutdown) holds for the whole delivery
         set_phase(NET_JOINING, claim);
         int64_t join_ms = 0;
         if (!join(&join_ms)) {
@@ -731,8 +760,21 @@ static void net_step(void)
 
 // ---------- public ----------
 
+// How the last net_shutdown before standby went (its log is lost when the USB console drops):
+// -1 none, else ms until Wi-Fi was off, or SHUTDOWN_BUSY when it was still on after 2 s.
+#define SHUTDOWN_BUSY 0x7FFFFFFF
+static RTC_DATA_ATTR int32_t s_rtc_shutdown_ms = -1;
+
 esp_err_t net_init(void)
 {
+    if (s_rtc_shutdown_ms >= 0) {
+        if (s_rtc_shutdown_ms == SHUTDOWN_BUSY) {
+            ESP_LOGW(TAG, "before standby: Wi-Fi was still busy after 2 s");
+        } else {
+            ESP_LOGI(TAG, "before standby: Wi-Fi off after %ld ms", (long)s_rtc_shutdown_ms);
+        }
+        s_rtc_shutdown_ms = -1;
+    }
     s_lock = xSemaphoreCreateMutex();
     s_radio = xSemaphoreCreateMutex();
     s_ev = xEventGroupCreate();
@@ -781,6 +823,7 @@ void net_note_power(uint16_t vbat_mv, bool usb)
 {
     s_vbat_mv = vbat_mv;
     s_usb = usb;
+    s_power_known = true;
 }
 
 void net_get_status(net_status_t *out)
@@ -853,9 +896,15 @@ void net_shutdown(void)
     s_stop = true;
     sambot_abort();
     xEventGroupSetBits(s_ev, EV_KICK);
-    // The task finishes the call in progress (aborted within about a second) and switches Wi-Fi off.
-    xEventGroupWaitBits(s_ev, EV_IDLE, pdFALSE, pdTRUE, pdMS_TO_TICKS(2000));
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // The task finishes the call in progress (aborted within about a second, or when a blocking
+    // connect gives up) and switches Wi-Fi off before deep sleep or power-off.
+    int64_t t0 = now_us();
+    if (xEventGroupWaitBits(s_ev, EV_STOPPED, pdFALSE, pdTRUE, pdMS_TO_TICKS(2000)) & EV_STOPPED) {
+        s_rtc_shutdown_ms = (int32_t)((now_us() - t0) / 1000);
+    } else {
+        s_rtc_shutdown_ms = SHUTDOWN_BUSY;
+        ESP_LOGW(TAG, "shutdown: Wi-Fi still busy after 2 s");
+    }
 }
 
 esp_err_t net_wifi_add(const char *ssid, const char *pass)
@@ -1019,6 +1068,16 @@ void net_scan_print(void)
 
 // ---------- USB console ----------
 
+// A line that may hold a secret (well-formed or not): wipe its words from `from` on and drop the
+// console history. The REPL's own copy of the line is freed unwiped (esp_console), not reachable here.
+static void scrub(int argc, char **argv, int from)
+{
+    for (int i = from; i < argc; i++) {
+        memset(argv[i], 0, strlen(argv[i]));
+    }
+    linenoiseHistoryFree();
+}
+
 static int cmd_wifi(int argc, char **argv)
 {
     esp_err_t err;
@@ -1026,12 +1085,13 @@ static int cmd_wifi(int argc, char **argv)
         net_print();
         return 0;
     }
-    if ((argc == 3 || argc == 4) && strcmp(argv[1], "add") == 0) {
-        err = net_wifi_add(argv[2], argc == 4 ? argv[3] : "");
-        if (argc == 4) {
-            memset(argv[3], 0, strlen(argv[3]));
+    if (strcmp(argv[1], "add") == 0) {
+        err = argc == 3 || argc == 4 ? net_wifi_add(argv[2], argc == 4 ? argv[3] : "") : ESP_ERR_INVALID_ARG;
+        scrub(argc, argv, 3);  // the password
+        if (argc != 3 && argc != 4) {
+            printf("usage: wifi add <ssid> [password] (quote an SSID or password with spaces)\n");
+            return 1;
         }
-        linenoiseHistoryFree();  // the line held the password
         printf("%s\n", err == ESP_OK ? "stored" : esp_err_to_name(err));
         return err != ESP_OK;
     }
@@ -1069,10 +1129,13 @@ static int cmd_net(int argc, char **argv)
         printf("%s\n", err == ESP_OK ? "ok" : "usage: net mode wifi|phone-first|phone");
         return err != ESP_OK;
     }
-    if (argc == 3 && strcmp(argv[1], "token") == 0) {
-        err = net_set_token(strcmp(argv[2], "clear") == 0 ? NULL : argv[2]);
-        memset(argv[2], 0, strlen(argv[2]));
-        linenoiseHistoryFree();  // the line held the token
+    if (strcmp(argv[1], "token") == 0) {
+        err = argc == 3 ? net_set_token(strcmp(argv[2], "clear") == 0 ? NULL : argv[2]) : ESP_ERR_INVALID_ARG;
+        scrub(argc, argv, 2);  // the token
+        if (argc != 3) {
+            printf("usage: net token <token>|clear\n");
+            return 1;
+        }
         printf("%s\n", err == ESP_OK ? "token stored" : esp_err_to_name(err));
         return err != ESP_OK;
     }

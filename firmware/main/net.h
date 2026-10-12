@@ -37,9 +37,11 @@ esp_err_t net_init(void);
 // Deliver stored clips over Wi-Fi now (clip 0: all of them, oldest first). force: also when the
 // mode is "phone", after a failure, or with the phone connected (console `net send`).
 void net_kick(uint16_t clip, bool force);
-// A recording started (audio callback; does not block). Wi-Fi first: the clip is claimed for
-// Wi-Fi from its first byte and the network joined meanwhile, so the upload starts at release.
+// A recording started (audio callback; does not block), or is running at boot (after net_init).
+// Wi-Fi first: the clip is claimed for Wi-Fi from its first byte and the network joined meanwhile,
+// so the upload starts at release.
 void net_prepare(uint16_t clip);
+// Battery and USB power (vbat_mv 0: no battery, or no reading). Wi-Fi waits for the first call.
 void net_note_power(uint16_t vbat_mv, bool usb);
 void net_get_status(net_status_t *out);
 // Shows a Wi-Fi delivery in the phone-transfer fields the UI already follows: upload progress as a
