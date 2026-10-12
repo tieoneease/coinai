@@ -260,6 +260,7 @@ class SambotClientTest {
         val eventsRequest = requests.single { it.url.encodedPath == "/events" }
         assertEquals("GET", eventsRequest.method)
         assertEquals("web", eventsRequest.url.queryParameter("lane"))
+        assertEquals("1", eventsRequest.url.queryParameter("tail")) // not the whole transcript
         assertEquals("text/event-stream", eventsRequest.headers["Accept"])
         val prompt = requests.single { it.url.encodedPath == "/prompt" }
         assertEquals("POST", prompt.method)

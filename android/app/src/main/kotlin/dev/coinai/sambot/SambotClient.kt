@@ -93,7 +93,7 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
 
     /**
      * Sends [text] to the [lane] conversation and collects the assistant's reply:
-     * 1. open `GET /events?lane=` and discard everything up to the first `host_stream_live` (the
+     * 1. open `GET /events?lane=&tail=1` and discard everything up to the first `host_stream_live` (the
      *    replay/live boundary; replay holds old `message_end` and `agent_settled` frames);
      * 2. only then `POST /prompt`;
      * 3. append assistant text from `message_end`/`message` events until the first `agent_settled`.
@@ -111,7 +111,7 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         onDelta: ((String) -> Unit)?,
     ): AskResult = coroutineScope {
         val eventsCall = streamHttp.newCall(
-            request(url("events").newBuilder().addQueryParameter("lane", lane).build())
+            request(url("events").newBuilder().addQueryParameter("lane", lane).addQueryParameter("tail", REPLAY_TAIL).build())
                 .header("Accept", "text/event-stream")
                 .get()
                 .build(),
@@ -245,6 +245,12 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         const val AUTH_HEADER = "X-Exedev-Authorization"
         const val DEFAULT_BASE_URL = "https://sambot.exe.xyz"
 
+        /**
+         * History replayed before `host_stream_live`. Without `tail` SamBot replays the lane's whole
+         * transcript (119 MB in 2026-10) on every ask. `tail=0` would mean live-only but SamBot
+         * reads it as "everything" (`slice(-0)`), so ask for one event, which is discarded anyway.
+         */
+        private const val REPLAY_TAIL = "1"
         private const val HOST_STREAM_LIVE = "host_stream_live"
         private const val AGENT_SETTLED = "agent_settled"
         private const val MESSAGE_END = "message_end"
