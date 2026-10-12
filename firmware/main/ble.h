@@ -40,6 +40,17 @@ void ble_note_device_status(int battery_pct, bool charging, bool usb_power, bool
 void ble_clip_event(const audio_clip_result_t *clip, bool started);
 // Clips were removed outside the protocol (console): recount the pending clips and send STATUS.
 void ble_clips_changed(void);
+// Wi-Fi delivery (net.c) takes one clip at a time away from the phone: it is left out of LIST and
+// the pending count, and GET or ACK of it answer ERROR 4 (busy). Refused while the phone is
+// fetching the clip, or after the phone got all of it this boot without an ACK yet (it may be
+// processing it). ble_release_clip(true) gives a clip that is still stored back to the phone:
+// a connected phone gets CLIP_STARTED for it.
+bool ble_claim_clip(uint16_t id);
+void ble_release_clip(bool offer);
+uint16_t ble_claimed_clip(void);  // 0 = none
+// A reply that came another way (Wi-Fi), shown as if the phone had sent REPLY: state 0-1 opens the
+// reply window (reply_wait_s), 2-3 closes it; -1 closes it without a reply.
+void ble_note_reply(uint16_t clip, int state, const char *text);
 // Bench mode: protocol messages accepted without pairing, until the next reboot. USB console only.
 void ble_set_bench(bool on);
 // USB console test link (`ble inject <hex>`): feeds one ctrl TLV to the protocol worker as if the

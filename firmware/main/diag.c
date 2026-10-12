@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "imu.h"
 #include "lvgl.h"
+#include "net.h"
 #include "pmic.h"
 #include "power.h"
 #include "ui.h"
@@ -356,7 +357,49 @@ static int cmd_clip(int argc, char **argv)
                (unsigned long long)m.start_utc_ms);
         return 0;
     }
-    printf("usage: clip get <id> | clip rm <id|all> | clip meta <id> [redo]\n");
+    if (argc == 3 && strcmp(argv[1], "put") == 0) {
+        // A test clip from the PC (scripts/clipput.py): clip put begin | <hex> | end. No metadata
+        // file, so its size, CRC and duration are computed from the file (voiced unknown).
+        static FILE *pf;
+        static uint16_t pid;
+        char path[32];
+        if (strcmp(argv[2], "begin") == 0) {
+            if (pf) {
+                fclose(pf);
+            }
+            pid = clipstore_next_id();
+            clipstore_path(pid, path, sizeof path);
+            pf = fopen(path, "wb");
+            printf(pf ? "clip put %u\n" : "clip put failed\n", pid);
+            return pf ? 0 : 1;
+        }
+        if (!pf) {
+            printf("clip put begin first\n");
+            return 1;
+        }
+        if (strcmp(argv[2], "end") == 0) {
+            fclose(pf);
+            pf = NULL;
+            ble_clips_changed();
+            printf("clip %u stored\n", pid);
+            return 0;
+        }
+        size_t hex = strlen(argv[2]);
+        uint8_t buf[320];
+        if (hex % 2 || hex / 2 > sizeof buf) {
+            printf("clip put: even number of hex digits, at most %u bytes\n", (unsigned)sizeof buf);
+            return 1;
+        }
+        for (size_t i = 0; i < hex / 2; i++) {
+            unsigned v;
+            sscanf(argv[2] + 2 * i, "%2x", &v);
+            buf[i] = (uint8_t)v;
+        }
+        bool ok = fwrite(buf, 1, hex / 2, pf) == hex / 2;
+        printf(ok ? "ok\n" : "write failed\n");
+        return ok ? 0 : 1;
+    }
+    printf("usage: clip get <id> | clip rm <id|all> | clip meta <id> [redo] | clip put begin|<hex>|end\n");
     return 1;
 }
 
@@ -544,7 +587,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "fbdump", .help = "Dump the active screen as base64 RGB565", .func = cmd_fbdump},
         {.command = "rec", .help = "Record a clip: rec <seconds> | rec start | rec stop", .func = cmd_rec},
         {.command = "clips", .help = "List stored clips and storage use", .func = cmd_clips},
-        {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all> | clip meta <id> [redo]", .func = cmd_clip},
+        {.command = "clip", .help = "clip get <id> (base64 dump) | clip rm <id|all> | clip meta <id> [redo] | clip put begin|<hex>|end", .func = cmd_clip},
         {.command = "play", .help = "Play a clip on the speaker: play <id>", .func = cmd_play},
         {.command = "tone", .help = "Speaker test tone: tone [hz] [ms]", .func = cmd_tone},
         {.command = "level", .help = "Microphone peak level for 2 s", .func = cmd_level},
@@ -562,6 +605,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
     for (size_t i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
         ESP_RETURN_ON_ERROR(esp_console_cmd_register(&cmds[i]), TAG, "register %s", cmds[i].command);
     }
+    ESP_RETURN_ON_ERROR(net_console_register(), TAG, "net commands");
     ESP_RETURN_ON_ERROR(esp_console_register_help_command(), TAG, "help");
     return esp_console_start_repl(repl);
 }

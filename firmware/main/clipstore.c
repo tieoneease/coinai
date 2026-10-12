@@ -183,6 +183,23 @@ void clipstore_discard(uint16_t id)
     }
 }
 
+void clipstore_hide(uint16_t id)
+{
+    char path[32];
+    dis_path(id, path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fclose(f);
+    }
+}
+
+void clipstore_unhide(uint16_t id)
+{
+    char path[32];
+    dis_path(id, path, sizeof path);
+    remove(path);
+}
+
 #define META_MAGIC 0x314D4F43u  // "COM1"
 
 void clipstore_drop_meta(uint16_t id)

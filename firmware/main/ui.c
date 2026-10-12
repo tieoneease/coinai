@@ -18,6 +18,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "net.h"
 #include "misc/lv_text_private.h"  // lv_text_get_next_line
 #include "display/lv_display_private.h"  // inv_areas, LV_INV_BUF_SIZE (see inv_cb)
 #include "misc/lv_area_private.h"         // lv_area_join
@@ -71,7 +72,10 @@ static bool is_content(ui_mode_t m)
 typedef struct {
     bool rec;
     float level;
-    ble_status_t ble;
+    ble_status_t ble;        // a Wi-Fi delivery shows here too (net_overlay)
+    bool wifi_active;        // Wi-Fi is joining or delivering
+    bool wifi_ready;         // a clip ending now would go over Wi-Fi
+    bool wifi_configured;    // a network and a SamBot key are stored
     bool pmic_ok;
     pmic_status_t pmic;
 } inputs_t;
@@ -1023,7 +1027,8 @@ static float f_saved(int k)
         return 0.12f;
     case 1:
         item_attach(IT_BODY, build_caption("Saved on the coin", 206, F28, COL_TEXT), 14);
-        item_attach(IT_SUB, build_caption("Your phone isn't in reach.", 252, F20, COL_DIM), 14);
+        item_attach(IT_SUB, build_caption(s_in.wifi_configured ? "No phone or Wi-Fi in reach." : "Your phone isn't in reach.",
+                                          252, F20, COL_DIM), 14);
         return 0.22f;
     case 2: {
         char t[24];
@@ -1163,7 +1168,9 @@ static int recent_rows(char titles[4][48], char subs[4][32], int *reply_idx)
     uint16_t pending = s_in.ble.pending;
     if (pending && !s_in.rec) {
         snprintf(titles[n], 48, "%u clip%s waiting", pending, pending == 1 ? "" : "s");
-        snprintf(subs[n], 32, "%s", s_in.ble.connected ? "Sending to the phone" : "Phone not in reach");
+        snprintf(subs[n], 32, "%s", s_in.wifi_active    ? "Sending over Wi-Fi"
+                                    : s_in.ble.connected ? "Sending to the phone"
+                                                         : "Phone not in reach");
         reply_idx[n++] = -1;
     }
     for (int i = 0; i < s_nrecent && n < 3; i++) {
@@ -1840,6 +1847,12 @@ static void gather(void)
     int64_t now = esp_timer_get_time();
     if (!s_last_ble_us || now - s_last_ble_us > 50000) {
         ble_get_status(&s_in.ble);
+        net_overlay(&s_in.ble);
+        net_status_t ns;
+        net_get_status(&ns);
+        s_in.wifi_active = ns.phase != NET_IDLE;
+        s_in.wifi_ready = ns.ready;
+        s_in.wifi_configured = ns.configured;
         s_last_ble_us = now;
     }
     if (s_status_valid) {
@@ -1871,7 +1884,7 @@ static void on_clip_done(const audio_clip_result_t *c)
     s_clip = c->id;
     if (c->voiced_ms != CLIP_VOICED_UNKNOWN && c->voiced_ms < NO_SPEECH_MS) {
         FLOW(f_nospeech);
-    } else if (s_in.ble.connected) {
+    } else if (s_in.ble.connected || s_in.wifi_active || s_in.wifi_ready) {
         FLOW(f_send);
     } else {
         FLOW(f_away);
@@ -2048,7 +2061,7 @@ static void react(void)
             } else {
                 FLOW(f_sent);
             }
-        } else if (!in->ble.connected && s_now - s_t0 > 2) {
+        } else if (!in->ble.connected && !in->wifi_active && s_now - s_t0 > 2) {
             FLOW(f_saved);
         } else if (s_now - s_t0 > 15) {
             FLOW(f_saved);
@@ -2056,7 +2069,7 @@ static void react(void)
         break;
     }
     case M_AWAY:
-        if (in->ble.connected && in->ble.transferring) {
+        if (in->ble.transferring) {  // the phone, or Wi-Fi (net_overlay)
             FLOW(f_send);
         }
         break;

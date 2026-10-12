@@ -68,8 +68,8 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 | `0x02` | `LIST` | empty |
 | `0x03` | `GET` | `clip u16`, `offset u32` |
 | `0x04` | `ACK` | `clip u16`, `crc32 u32` |
-| `0x05` | `WIFI_SET` | `ssid_len u8`, `ssid` (\≤ 32 bytes), `pass_len u8`, `password` (\≤ 64 bytes) |
-| `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16` (0–600, default 45), `0x02` brightness `u8` (percent, 1–100, default 100), `0x03` idle_timeout_s `u16` (5–3600, default 30), `0x04` off_after_h `u16` (0–720, 0 = never, default 0), `0x05` utc_offset_min `i16` (local time minus UTC in minutes, −720 to 840; unset until sent, and the coin shows no clock until then). Stored on the device; out of range → `ERROR` code 5 |
+| `0x05` | `WIFI_SET` | `ssid_len u8`, `ssid` (1–32 bytes), `pass_len u8`, `password` (0 bytes for an open network, else 8–64). Adds the network to the coin's list of up to 4 for Wi-Fi delivery (the newest first, the oldest dropped; the same SSID again replaces its password). Invalid → `ERROR` code 5 |
+| `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16` (0–600, default 45), `0x02` brightness `u8` (percent, 1–100, default 100), `0x03` idle_timeout_s `u16` (5–3600, default 30), `0x04` off_after_h `u16` (0–720, 0 = never, default 0), `0x05` utc_offset_min `i16` (local time minus UTC in minutes, −720 to 840; unset until sent, and the coin shows no clock until then), `0x06` delivery `u16` (0 Wi-Fi first, 1 phone first, 2 phone only; default 0; see "Wi-Fi delivery"). Stored on the device; out of range → `ERROR` code 5 |
 | `0x07` | `REPLY` | `clip u16`, `state u8` (0 transcribing, 1 thinking, 2 done, 3 failed), `text` (\≤ 200 bytes) |
 | `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording), `pending u16`, `fw_version` (\≤ 32 bytes) |
 | `0x82` | `CLIP_STARTED` | `clip u16`, `codec u8` (1 = Ogg Opus), `sample_rate u32`, `start_utc_ms u64` (0 = unknown) |
@@ -78,11 +78,12 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 | `0x85` | `ERROR` | `request_type u8`, `code u8` (1 unknown clip, 2 bad offset, 3 bad length, 4 busy, 5 invalid value), `clip u16` (`0xFFFF` if none) |
 
 - **CRC-32:** IEEE 802.3, the same as zlib's `crc32`, taken over the whole `.ogg` file.
-- **Which messages are unsolicited:** `STATUS` (also whenever battery, charging, recording or the pending count changes) and `CLIP_STARTED` (a recording began during the connection; the app may `GET` it at once and receive it as it is recorded). Everything else answers a request.
+- **Which messages are unsolicited:** `STATUS` (also whenever battery, charging, recording or the pending count changes) and `CLIP_STARTED` (a recording began during the connection, or Wi-Fi gave a clip back; the app may `GET` it at once, and a recording one arrives as it is recorded). Everything else answers a request.
 - **Answers:** `HELLO` → `STATUS`. `LIST` → one or more `LIST_RESULT`. `GET` → data packets, then `CLIP_ENDED`. A matching `ACK` → `STATUS` with the new pending count; a refused one → `ERROR`. A malformed or invalid request → `ERROR`.
 - **A new `GET` replaces a running one;** the replaced transfer gets no `CLIP_ENDED`.
 - **A clip discarded while it streams** (the user held BOOT during the recording) is deleted on the device. The transfer stops with `ERROR` code 1 for that clip instead of `CLIP_ENDED`, and the clip leaves the pending count; the app drops what it received.
 - **Clip ids:** `u16`, increasing, kept across reboots in NVS. They wrap after 65535.
+- **A clip the coin is sending over Wi-Fi** is not the phone's: `LIST_RESULT` and the pending count leave it out, `CLIP_STARTED` is not sent for it, and a `GET` or `ACK` of it gets `ERROR` code 4 (busy). It then either disappears (delivered: a later `GET` gets code 1) or comes back with `CLIP_STARTED` (Wi-Fi failed before SamBot was prompted).
 - **On connect:** the device answers `HELLO` with `STATUS`.
 
 ### Standard services
@@ -105,3 +106,12 @@ Device Information (0x180A) and Battery (0x180F, with level notifications).
    - The app removes markdown, and any characters the coin's font lacks, before sending. The font covers printable ASCII (0x20–0x7E) and newline. The coin itself maps ‘ ’ ′ to `'`, “ ” ″ to `"`, … to `...`, – — − • · to `-`, no-break and thin spaces to a space, ° to ` deg` and × to `x`, and drops anything else.
    - In state `thinking` the text may carry what SamBot heard (the transcript); the coin shows it while it waits.
 8. **Local time.** The coin shows a clock only after the app has sent `utc_offset_min` (`CFG_SET` key `0x05`). The app sends it after `HELLO` and whenever the phone's time zone changes.
+
+## Wi-Fi delivery
+
+With a known network (`WIFI_SET`) and a SamBot token stored, the coin can send clips to SamBot itself (PLAN.md D10). It makes the same calls as the app: `POST /voice/transcribe`, then `GET /events?lane=web&tail=1` until `host_stream_live`, `POST /prompt`, and the assistant's text until `agent_settled`, through the exe.dev proxy with the token in `X-Exedev-Authorization`. The coin shows the progress and reply as if the app had sent `REPLY`. The prompt goes out at most once: the coin marks the clip on flash before `POST /prompt`, and a clip so marked is deleted at the next boot instead of being sent again.
+
+- **`delivery` (`CFG_SET` key `0x06`):** 0 = Wi-Fi first: a new recording is the coin's from its first byte, and goes to the phone only if no known network answers or SamBot is not reached. 1 = phone first: Wi-Fi only when no phone is connected when the clip ends. 2 = phone only. Clips left from earlier go over Wi-Fi in the background in modes 0 and 1.
+- **Left to the phone:** clips below the voiced threshold (the app keeps them as "no speech"), clips the phone received in full but has not `ACK`ed yet, and everything while the battery is below 3.6 V off USB power.
+- **The token** is set over the USB console (`net token`), never sent back. It is an exe.dev API token scoped to the SamBot VM.
+- **Firmware status:** built; the network calls have not yet run against a real network.

@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "imu.h"
+#include "net.h"
 #include "nvs.h"
 #include "pmic.h"
 #include "soc/rtc.h"
@@ -192,6 +193,7 @@ bool power_test_series_next(void)
 
 static void peripherals_down(void)
 {
+    net_shutdown();  // Wi-Fi off; a prompt already sent still gets its answer in SamBot
     ble_shutdown();  // the phone sees the link end now instead of after the supervision timeout
     audio_shutdown();
     imu_sleep();

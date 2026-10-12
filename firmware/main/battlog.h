@@ -7,7 +7,8 @@
 //
 // rtc_s: seconds on the RTC timer, which runs since the PMIC powered the chip and through deep
 // sleep (not through Off). event: B boot/wake, P periodic, C state change, S standby entry,
-// O power off. flags: U USB power, C charging, D screen on, R recording, L phone connected.
+// O power off. flags: U USB power, C charging, D screen on, R recording, L phone connected,
+// W Wi-Fi on.
 // Periodic records come every minute on battery and every 5 minutes on USB.
 
 #include <stdbool.h>
@@ -19,6 +20,7 @@
 #define BATTLOG_SCREEN 0x04
 #define BATTLOG_REC    0x08
 #define BATTLOG_LINK   0x10
+#define BATTLOG_WIFI   0x20
 
 // Called by the status task with every PMIC reading; writes when a record is due.
 void battlog_sample(const pmic_status_t *p, uint8_t flags);

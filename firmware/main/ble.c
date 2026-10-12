@@ -1,6 +1,7 @@
 #include "ble.h"
 
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include "ble_link.h"
@@ -13,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "net.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -35,7 +37,10 @@ enum { ERR_UNKNOWN_CLIP = 1, ERR_BAD_OFFSET = 2, ERR_BAD_LENGTH = 3, ERR_BUSY = 
 #define MAX_LIST       256
 #define FAST_ADV_MS    30000
 
-typedef enum { EV_RX, EV_CLIP_STARTED, EV_CLIP_FINISHED, EV_STATUS, EV_CLIPS_CHANGED, EV_CONNECTED, EV_DISCONNECTED } ev_type_t;
+typedef enum {
+    EV_RX, EV_CLIP_STARTED, EV_CLIP_FINISHED, EV_STATUS, EV_CLIPS_CHANGED, EV_CONNECTED, EV_DISCONNECTED,
+    EV_CLIP_OFFERED,  // Wi-Fi gave a clip back: announce it to a connected phone
+} ev_type_t;
 typedef struct {
     ev_type_t type;
     uint16_t len;
@@ -56,6 +61,11 @@ static ble_adv_mode_t s_adv_mode = BLE_ADV_OFF;
 static int64_t s_fast_adv_until_us;
 static ble_status_t s_st = {.reply_state = -1};
 static int64_t s_reply_deadline_us;
+// Wi-Fi delivery (net.c) holds this clip: not listed, not counted, GET and ACK answer busy. Under s_lock.
+static uint16_t s_claim;
+// Clips the phone got in full this boot but has not ACKed yet: it may be processing them, so Wi-Fi
+// must not send them too. Under s_lock.
+static uint16_t s_handed[4];
 static struct {
     int battery_pct;
     bool charging, usb, recording;
@@ -99,12 +109,48 @@ static void post(ev_type_t type, const void *buf, size_t len)
     }
 }
 
+static bool clip_stored(uint16_t id)
+{
+    char path[32];
+    struct stat st;
+    clipstore_path(id, path, sizeof path);
+    return id && stat(path, &st) == 0 && !clipstore_discarded(id);
+}
+
 static void refresh_pending(void)
 {
-    uint16_t n = (uint16_t)clipstore_count();
+    int n = clipstore_count();
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_dev.pending = n;
+    uint16_t claim = s_claim;
     xSemaphoreGive(s_lock);
+    if (claim && clip_stored(claim)) {
+        n--;  // the phone neither sees nor fetches it
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_dev.pending = (uint16_t)(n < 0 ? 0 : n);
+    xSemaphoreGive(s_lock);
+}
+
+static bool claimed(uint16_t id)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool c = id && id == s_claim;
+    xSemaphoreGive(s_lock);
+    return c;
+}
+
+// Under s_lock.
+static void set_handed(uint16_t id, bool on)
+{
+    for (int i = 0; i < 4; i++) {
+        if (s_handed[i] == id) {
+            s_handed[i] = 0;
+        }
+    }
+    if (on) {
+        memmove(s_handed + 1, s_handed, 3 * sizeof s_handed[0]);
+        s_handed[0] = id;
+    }
 }
 
 // ---------- outgoing ctrl messages (worker task only) ----------
@@ -191,6 +237,13 @@ static void send_list(void)
     EXT_RAM_BSS_ATTR static clip_info_t list[MAX_LIST];
     int n = clipstore_list(list, MAX_LIST);
     uint16_t recording = audio_recording_clip();
+    for (int j = 0; j < n; j++) {
+        if (claimed(list[j].id)) {
+            memmove(list + j, list + j + 1, (n - j - 1) * sizeof list[0]);
+            n--;
+            break;
+        }
+    }
     int i = 0;
     do {
         uint8_t v[1 + LIST_PER_MSG * 7];
@@ -242,8 +295,13 @@ static void handle_get(uint16_t clip, uint32_t offset)
         send_error(MSG_GET, ERR_BAD_OFFSET, clip);
         return;
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);  // the claim check and the transfer start, as one step
+    if (clip == s_claim) {
+        xSemaphoreGive(s_lock);
+        send_error(MSG_GET, ERR_BUSY, clip);  // going over Wi-Fi: gone (ERROR 1) or offered back later
+        return;
+    }
     s_tx = (typeof(s_tx)){.active = true, .clip = clip, .offset = offset, .complete = complete, .meta = meta};
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     s_st.transferring = true;
     s_st.tx_clip = clip;
     s_st.tx_offset = offset;
@@ -267,6 +325,9 @@ static void send_clip_ended(void)
     put64(v + 18, s_tx.meta.start_utc_ms);
     ESP_LOGI(TAG, "clip %u sent: %lu bytes, crc %08lx", s_tx.clip, (unsigned long)s_tx.meta.size,
              (unsigned long)s_tx.meta.crc32);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    set_handed(s_tx.clip, true);
+    xSemaphoreGive(s_lock);
     tx_stop();
     send_ctrl(MSG_CLIP_ENDED, v, sizeof v);
 }
@@ -377,6 +438,10 @@ static void set_reply_window(bool open)
 
 static void handle_ack(uint16_t clip, uint32_t crc)
 {
+    if (claimed(clip)) {
+        send_error(MSG_ACK, ERR_BUSY, clip);
+        return;
+    }
     clip_meta_t meta;
     bool complete;
     if (clipstore_get_meta(clip, audio_recording_clip(), &meta, &complete) != ESP_OK) {
@@ -391,6 +456,9 @@ static void handle_ack(uint16_t clip, uint32_t crc)
         tx_stop();
     }
     clipstore_remove(clip);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    set_handed(clip, false);
+    xSemaphoreGive(s_lock);
     refresh_pending();
     uint16_t pending = s_dev.pending;
     ESP_LOGI(TAG, "clip %u acknowledged and deleted; %u pending", clip, pending);
@@ -434,14 +502,11 @@ static void handle_wifi(const uint8_t *v, uint16_t len)
     char ssid[33] = {0}, pass[65] = {0};
     memcpy(ssid, v + 1, v[0]);
     memcpy(pass, v + 2 + v[0], v[1 + v[0]]);
-    nvs_handle_t nvs;
-    if (nvs_open("wifi", NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_str(nvs, "ssid", ssid);
-        nvs_set_str(nvs, "pass", pass);
-        nvs_commit(nvs);
-        nvs_close(nvs);
+    esp_err_t err = v[0] == 0 ? ESP_ERR_INVALID_ARG : net_wifi_add(ssid, pass);  // logs the SSID, never the password
+    memset(pass, 0, sizeof pass);
+    if (err != ESP_OK) {
+        send_error(MSG_WIFI_SET, ERR_INVALID, 0xFFFF);
     }
-    ESP_LOGI(TAG, "Wi-Fi credentials stored for \"%s\"", ssid);  // never the password
 }
 
 static void handle_reply(const uint8_t *v, uint16_t len)
@@ -536,7 +601,27 @@ static void worker_task(void *arg)
                 v[2] = 1;  // Ogg Opus
                 put32(v + 3, 16000);
                 put64(v + 7, utc_now_ms());
-                send_ctrl(MSG_CLIP_STARTED, v, sizeof v);
+                if (!claimed(get16(v))) {  // a clip Wi-Fi delivers is announced only if it comes back
+                    send_ctrl(MSG_CLIP_STARTED, v, sizeof v);
+                }
+                send_status();
+                break;
+            }
+            case EV_CLIP_OFFERED: {
+                // PROTOCOL.md: CLIP_STARTED also offers a clip Wi-Fi gave back; it may be complete.
+                refresh_pending();
+                uint16_t id = get16(ev.buf);
+                clip_meta_t meta;
+                bool complete;
+                if (s_conn != LINK_CONN_NONE &&
+                    clipstore_get_meta(id, audio_recording_clip(), &meta, &complete) == ESP_OK) {
+                    uint8_t v[15];
+                    put16(v, id);
+                    v[2] = 1;
+                    put32(v + 3, 16000);
+                    put64(v + 7, meta.start_utc_ms);
+                    send_ctrl(MSG_CLIP_STARTED, v, sizeof v);
+                }
                 send_status();
                 break;
             }
@@ -776,6 +861,80 @@ void ble_clips_changed(void)
     if (s_ev) {
         post(EV_CLIPS_CHANGED, NULL, 0);
     }
+}
+
+bool ble_claim_clip(uint16_t id)
+{
+    if (!s_lock || !id) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool ok = s_claim == 0 && !(s_st.transferring && s_st.tx_clip == id);
+    for (int i = 0; i < 4 && ok; i++) {
+        ok = s_handed[i] != id;
+    }
+    if (ok) {
+        s_claim = id;
+    }
+    xSemaphoreGive(s_lock);
+    if (ok) {
+        post(EV_CLIPS_CHANGED, NULL, 0);
+    }
+    return ok;
+}
+
+void ble_release_clip(bool offer)
+{
+    if (!s_lock) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint16_t id = s_claim;
+    s_claim = 0;
+    xSemaphoreGive(s_lock);
+    if (!id) {
+        return;
+    }
+    if (offer && clip_stored(id)) {
+        uint8_t b[2];
+        put16(b, id);
+        post(EV_CLIP_OFFERED, b, 2);
+    } else {
+        post(EV_CLIPS_CHANGED, NULL, 0);
+    }
+}
+
+uint16_t ble_claimed_clip(void)
+{
+    if (!s_lock) {
+        return 0;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint16_t id = s_claim;
+    xSemaphoreGive(s_lock);
+    return id;
+}
+
+void ble_note_reply(uint16_t clip, int state, const char *text)
+{
+    if (!s_lock) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_st.reply_clip = clip;
+    s_st.reply_state = state;
+    snprintf(s_st.reply_text, sizeof s_st.reply_text, "%s", text ? text : "");
+    if (state >= 0 && state < 2) {
+        if (!s_st.reply_window) {
+            s_reply_deadline_us = esp_timer_get_time() + (int64_t)settings_get(SET_REPLY_WAIT_S) * 1000000;
+            s_st.reply_window = true;
+        }
+    } else {
+        s_reply_deadline_us = 0;
+        s_st.reply_window = false;
+    }
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "reply (Wi-Fi) clip %u state %d: %.40s", clip, state, text ? text : "");
 }
 
 void ble_inject(const uint8_t *tlv, size_t len)

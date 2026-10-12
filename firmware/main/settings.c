@@ -20,6 +20,7 @@ static const spec_t SPECS[] = {
     [SET_IDLE_S] = {"idle_s", 30, 5, 3600},
     [SET_OFF_AFTER_H] = {"off_h", 0, 0, 24 * 30},
     [SET_UTC_OFFSET_MIN] = {"utc_off", SETTINGS_UTC_OFFSET_UNSET, -12 * 60, 14 * 60, true},
+    [SET_DELIVERY] = {"delivery", DELIVERY_WIFI_FIRST, 0, 2},
 };
 #define NSPECS (sizeof SPECS / sizeof SPECS[0])
 

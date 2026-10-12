@@ -36,8 +36,8 @@ static void write_record(char event, const pmic_status_t *p, uint8_t flags)
 {
     char f[8];
     int n = 0;
-    const char letters[] = "UCDRL";
-    for (int i = 0; i < 5; i++) {
+    const char letters[] = "UCDRLW";
+    for (int i = 0; i < 6; i++) {
         if (flags & (1 << i)) {
             f[n++] = letters[i];
         }

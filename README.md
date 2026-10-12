@@ -1,6 +1,6 @@
 # coinai
 
-Push-to-talk voice capture: a Waveshare ESP32-S3-Touch-AMOLED-1.75C records whenever PWR is held, and an Android app delivers the clips to SamBot. The plan is in [PLAN.md](PLAN.md), the board facts in [HARDWARE.md](HARDWARE.md), and the device ↔ app contract in [PROTOCOL.md](PROTOCOL.md).
+Push-to-talk voice capture: a Waveshare ESP32-S3-Touch-AMOLED-1.75C records whenever PWR is held, and the clips reach SamBot over Wi-Fi from the coin itself or through an Android app over BLE. The plan is in [PLAN.md](PLAN.md), the board facts in [HARDWARE.md](HARDWARE.md), and the device ↔ app contract in [PROTOCOL.md](PROTOCOL.md).
 
 ## Toolchain on this PC
 
@@ -42,6 +42,9 @@ Console commands (type `help` on the console for the full list):
 | `i2cscan`, `imu`, `stats` | bus scan, one IMU sample; `stats`: internal RAM at each boot step, every internal allocation of 2 KB or more with a backtrace (`addr2line -e build/coinai.elf`), heap now |
 | `rec <s>`, `rec start\|stop`, `clips`, `clip get <id>`, `clip rm <id\|all>` | record (blocking, or start and stop without waiting), list, dump, delete clips |
 | `clip meta <id> [redo]` | a clip's metadata; `redo` drops it first, so the cut-off-clip recovery recomputes it |
+| `clip put begin\|<hex>\|end` | store a file as a new clip (`python scripts/clipput.py COM9 file.ogg`), for testing delivery with a known recording |
+| `wifi`, `wifi add <ssid> [password]`, `wifi forget <ssid\|all>`, `wifi scan` | Wi-Fi networks for delivery (up to 4; quote an SSID with spaces), and what is in range |
+| `net`, `net send [clip]`, `net mode wifi\|phone-first\|phone`, `net token <token>\|clear`, `net url <url>` | Wi-Fi delivery state; send a clip (or the oldest) over Wi-Fi now, whatever the mode; delivery order (`CFG_SET` 0x06); the SamBot token (never printed back) and address |
 | `ble`, `ble bench [on\|off]`, `ble forget`, `ble adv off\|idle\|deliver`, `ble txpower <dBm>` | BLE state and RSSI, bench mode (no pairing, until reboot), delete bonds, advertising mode, radio power |
 | `play <id>`, `tone [hz] [ms]`, `level`, `loopback [hz]` | speaker and microphone checks |
 | `sleep [s] [rec]` | standby; wakes on PWR, or after `s` seconds (`rec`: the wake records like a PWR hold) |

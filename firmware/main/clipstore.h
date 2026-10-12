@@ -37,6 +37,11 @@ void clipstore_discard(uint16_t id);
 bool clipstore_discarded(uint16_t id);
 bool clipstore_discard_pending(uint16_t id);  // the latest discard only, from RAM: for hot paths
 void clipstore_sweep(void);  // deletes clips discarded before a reboot; off the wake path
+// A clip being prompted over Wi-Fi (net.c) gets the same tombstone: hidden from BLE, and if the coin
+// resets before clipstore_remove() or clipstore_unhide(), the next boot deletes it. The prompt may
+// have gone out, and it is never sent twice.
+void clipstore_hide(uint16_t id);
+void clipstore_unhide(uint16_t id);
 esp_err_t clipstore_usage(size_t *total, size_t *used);
 esp_err_t clipstore_put_meta(uint16_t id, const clip_meta_t *meta);
 void clipstore_drop_meta(uint16_t id);  // test hook: makes the clip look cut off

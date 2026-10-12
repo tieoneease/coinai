@@ -1,4 +1,5 @@
-// coinai firmware: push-to-talk from Active, Standby and Off; clips go to the phone over BLE.
+// coinai firmware: push-to-talk from Active, Standby and Off; clips go to SamBot over Wi-Fi or to
+// the phone over BLE (net.h).
 //
 // PWR hold = record. PWR tap = standby once the phone has its clips (from Active) or screen on
 // (from standby). BOOT held, then PWR held 3 s = power off. A wake by PWR that is still held
@@ -21,6 +22,7 @@
 #include "freertos/task.h"
 #include "imu.h"
 #include "input.h"
+#include "net.h"
 #include "nvs_flash.h"
 #include "pmic.h"
 #include "power.h"
@@ -91,6 +93,9 @@ static void post(ctl_type_t type, const audio_clip_result_t *clip)
 
 static void on_clip(const audio_clip_result_t *clip, bool started, void *ctx)
 {
+    if (started) {
+        net_prepare(clip->id);  // before BLE announces the clip: Wi-Fi first may claim it
+    }
     ble_clip_event(clip, started);
     if (started) {
         return;
@@ -230,6 +235,7 @@ static void status_task(void *arg)
         }
         if (st.pmic_ok) {
             s_vbus = st.pmic.vbus_good;
+            net_note_power(st.pmic.battery_present ? st.pmic.vbat_mv : 0, s_vbus);
         }
         st.imu_ok = imu_read(&st.imu) == ESP_OK;
         input_get(&st.pwr_pressed, &st.boot_pressed);
@@ -246,9 +252,12 @@ static void status_task(void *arg)
                                st.pmic_ok && st.pmic.charging,
                                s_vbus, st.recording);
         ble_get_status(&st.ble);
+        net_status_t ns;
+        net_get_status(&ns);
         if (st.pmic_ok) {
             battlog_sample(&st.pmic, (display_get_brightness() > 0 ? BATTLOG_SCREEN : 0) |
-                                         (st.recording ? BATTLOG_REC : 0) | (st.ble.connected ? BATTLOG_LINK : 0));
+                                         (st.recording ? BATTLOG_REC : 0) | (st.ble.connected ? BATTLOG_LINK : 0) |
+                                         (ns.wifi_up ? BATTLOG_WIFI : 0));
         }
 
         if (bsp_display_lock(100) == ESP_OK) {
@@ -288,7 +297,8 @@ static void log_wake_recording(const audio_clip_result_t *clip)
 // Owns standby and power-off decisions; runs on the main task after start-up.
 //
 // The coin stays awake while it records, while the phone is fetching clips or waiting for
-// SamBot's reply (ble_busy), and for DELIVERY_S after a clip while clips are pending. Otherwise:
+// SamBot's reply (ble_busy), while Wi-Fi delivers (net_busy), and for DELIVERY_S after a clip
+// while clips are pending. Otherwise:
 // standby after the idle time on battery, screen off on USB power.
 static void control_loop(lv_display_t *disp)
 {
@@ -300,6 +310,7 @@ static void control_loop(lv_display_t *disp)
     int64_t deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
     int last_reply_state = -1;
     uint16_t last_reply_clip = 0;
+    uint16_t last_pending = 0;
     bool drowsy = false;
     esp_task_wdt_add(NULL);  // standby and power-off decisions must not hang (D5)
     for (;;) {
@@ -312,6 +323,7 @@ static void control_loop(lv_display_t *disp)
                 if (m.clip.id && !m.clip.discarded) {
                     deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
                     ble_set_adv_mode(BLE_ADV_DELIVER);
+                    net_kick(m.clip.id, false);
                 }
                 if (!wake_clip_pending) {
                     break;
@@ -358,6 +370,12 @@ static void control_loop(lv_display_t *disp)
             s_last_activity_us = now;  // a reply arrived: give the user time to read it
             standby_asap = false;
         }
+        if (bs.pending > last_pending && !wake_clip_pending) {
+            // More for the phone: a new clip, or one Wi-Fi gave back.
+            deliver_until_us = now + DELIVERY_S * 1000000LL;
+            ble_set_adv_mode(BLE_ADV_DELIVER);
+        }
+        last_pending = bs.pending;
         if (bs.pending == 0 && !audio_is_recording()) {
             ble_set_adv_mode(BLE_ADV_IDLE);
         }
@@ -380,13 +398,13 @@ static void control_loop(lv_display_t *disp)
             // After a tap only the transfer itself is waited for: no reply window, and at most
             // TAP_DELIVERY_S for a phone that has not connected yet.
             delivering = delivering && (bs.connected || now - standby_req_us < TAP_DELIVERY_S * 1000000LL);
-            if (!(audio_is_recording() || s_wake_hold || bs.passkey || delivering)) {
+            if (!(audio_is_recording() || s_wake_hold || bs.passkey || delivering || net_sending())) {
                 power_enter_standby(0, false);
             }
             continue;
         }
-        bool keep_awake = audio_is_recording() || s_wake_hold || ble_busy() || bs.passkey || delivering ||
-                          ui_keep_awake();
+        bool keep_awake = audio_is_recording() || s_wake_hold || ble_busy() || net_busy() || bs.passkey ||
+                          delivering || ui_keep_awake();
         int64_t limit_ms = (linger ? LINGER_S : settings_get(SET_IDLE_S)) * 1000LL;
         bool want_drowsy = !keep_awake && !screen_off && idle_ms >= limit_ms - DROWSY_MS;
         if (want_drowsy != drowsy) {
@@ -508,6 +526,12 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "BLE init failed");
     }
+    if (net_init() == ESP_OK) {
+        net_kick(0, false);  // clips left from before go now if a known network answers
+    } else {
+        ESP_LOGE(TAG, "Wi-Fi delivery init failed");
+    }
+    diag_mem_mark("net");
     s_last_activity_us = esp_timer_get_time();
     xTaskCreatePinnedToCoreWithCaps(status_task, "status", 4096, NULL, 5, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_ERROR_CHECK(diag_start(bus));

@@ -25,7 +25,7 @@
    - Speaker.
    - IMU.
    - Battery, charging and power management.
-   - Wi-Fi (time sync, firmware updates).
+   - Wi-Fi (clip delivery straight to SamBot, time sync, firmware updates).
    - BLE.
 3. **Android app.**
    - Pairs with the device.
@@ -174,7 +174,7 @@ The matrix runs each condition with the settings at their defaults and with all 
 | `audio` | ES7210 capture, mono/high-pass, Opus via `esp_audio_codec`, Ogg page writer, speaker playback |
 | `clipstore` | LittleFS clip queue: write, flush, CRC, delete on ACK |
 | `ble` | NimBLE peripheral per PROTOCOL.md |
-| `net` | Wi-Fi STA (credentials from the app), SNTP, HTTPS OTA with rollback |
+| `net` | Wi-Fi STA (networks from the app or the USB console), clip delivery to SamBot (`sambot.c`), SNTP; HTTPS OTA with rollback to come |
 | `ui` | LVGL 9 screens around the eyes bot (the default face): recording, send/think/reply, Recent, Controls, brightness, settings, pairing passkey, power off; flows and springs; IMU tilt, shake and face-down |
 | `eyes` | The eyes bot: one custom-drawn LVGL object (eyes, lids, rim progress/orbit, ripple, "z"s) that invalidates only what moved |
 | `imu` | QMI8658 (`waveshare/qmi8658`); raise-to-wake later |
@@ -218,6 +218,7 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
 | 3 | standby → first audio frame **208–229 ms** over 10 unattended trials (target 400 ms) | **you:** real PWR presses from Standby and Off; BOOT+PWR power-off; then disable the PMIC long-press (D5) |
 | 4 | firmware GATT server built: advertises (seen by the PC), RAM budget fixed (93 KB internal free), recording unaffected by the radio. Protocol layer passes 11/11 edge-case checks over the USB console link, including resume and GET-while-recording (`evidence/phase4-selftest-serial.txt`). App slice 3 merged (89 unit tests: sends the UTC offset after HELLO, drops clips discarded mid-stream, sends the transcript with REPLY thinking). **No over-the-air exchange with the device yet:** the PC's adapter is too deaf to hold a connection | **you:** USB debugging on the phone (installs the app and runs the link tests), or attach the PC's Wi-Fi/BT antenna; pairing passkey entry on the phone |
 | 8 (UI) | the eyes-bot UI from the signed-off motion study runs on the coin and in the simulator. In the simulator every flow and screen was checked frame by frame (talk, fail, away, pair, no-speech, discard, power, sleep, low battery; Controls, brightness, Settings, About, Recent), including a real REPLY from a central, the clock from `utc_offset_min` and the BOOT-hold discard. On the coin the idle face renders 13 changed frames/s at 3.3 ms each (4% busy); flows hitched to 43–55 ms frames, traced to whole-ring rim redraws and whole-paragraph text fades. The fix (the rim sweeps in and drains, and text fades in line by line) is built and checked in the simulator, **not yet re-measured on the coin** | **you:** look at it on the coin; face-down → screen off, tilt direction, BOOT held 1 s while recording discards |
+| 7 (Wi-Fi delivery) | built (`net.c`, `sambot.c`, `plaintext.c`; D10 revised): up to 4 networks, delivery mode `CFG_SET` 0x06, the SamBot token on the USB console. On the coin: Wi-Fi starts and stops with BLE and the UI running (about 30 KB internal RAM left while it is on), the scan, the no-network fallback to the phone, and the token stored without being echoed. `plaintext.c` matches the app's `PlainText.forCoin` on its test cases. **Not yet run against a real network:** the PC's hotspot was not visible to the coin | **you:** the Wi-Fi network the coin should use (a phone hotspot or home Wi-Fi; 2.4 GHz, no sign-in page) |
 | sim | desktop simulator ([sim/README.md](sim/README.md)): the firmware runs as `coinsim.exe` with a browser UI. Over virtual BLE (Bumble, and netsim as the emulator uses) the full PROTOCOL.md exchange works with pairing and bonds, and a recorded sentence reaches SamBot exactly. It also exercised paths not yet tried on the device: cut-off clip recovery, low-battery off, idle Standby | **you:** enable Windows Hypervisor Platform and reboot, so the Android emulator can run the app against it |
 
 0. **Safety net and toolchains.**
@@ -262,9 +263,9 @@ Each phase ends with evidence on the device or your phone. **You** marks the ste
      - A clip recorded with the app closed appears in the web client as a prompt with SamBot's reply.
      - The same reply appears as a notification and on the coin.
      - Server-side timings come from SamBot's `voice_transcribe_*` log entries.
-7. **Wi-Fi, time and OTA.**
-   - Credentials from the app; SNTP; OTA from the app over BLE and/or Wi-Fi HTTPS; rollback.
-   - *Evidence:* an update from v1 to v2, and a bad image that rolls back.
+7. **Wi-Fi delivery, time and OTA.**
+   - Clips straight to SamBot over Wi-Fi (D10, PROTOCOL.md "Wi-Fi delivery"), the phone as the fallback; networks from the app; SNTP; OTA from the app over BLE and/or Wi-Fi HTTPS; rollback.
+   - *Evidence:* a clip recorded away from the phone gets its reply on the coin over Wi-Fi, with join, upload, transcribe and reply times; a clip recorded with no known network reaches the phone; an update from v1 to v2, and a bad image that rolls back.
 8. **Custom device UI and display performance; app UI polish.**
    - Mockups first, then build.
    - *Evidence:* FPS and flush-time numbers, tear-free motion (**you** check), `fbdump` captures.
@@ -299,7 +300,12 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - **D9 Native Kotlin with Compose for the app.**
   - *Rejected:* Flutter. The Android background pieces (`CompanionDeviceService`, foreground service, GATT) are native Kotlin either way; the open-source omi Flutter app implements them in Kotlin. Flutter would add a Dart bridge without removing that work. Its advantage, a shared UI with iOS, is out of scope.
   - *Rejected:* React Native, for the same reason.
-- **D10 The device sends to the phone over BLE; the phone talks to any server.**
+- **D10 (revised 2026-10-12) Wi-Fi first, the phone as the fallback.** On a known network the coin sends the clip to SamBot itself and shows the reply; otherwise the clip goes to the phone over BLE, which talks to any server. You chose this order; `CFG_SET` key 0x06 switches to phone first or phone only.
+  - *Why:* the clip and the reply no longer depend on the phone's background limits (ColorOS) or on the phone being near. A missing network shows within a scan (about 5 s with BLE on), while a missing phone shows only by timeout, so trying Wi-Fi first costs little when it fails.
+  - *Cost:* about 0.15–0.5 mAh more per clip (join, TLS, upload; estimated, to measure with `battlog` flag W). The TX peaks (about 350 mA) are left to the phone below 3.6 V on battery. The original "far more battery than BLE" below was overstated.
+  - *Credentials:* an exe.dev API token scoped to the SamBot VM (`--exp=never`), stored in NVS (not encrypted) and set over USB, never readable back. Anyone holding the coin with a USB cable could extract it; it can be revoked with `ssh exe.dev ssh-key`, and SamBot can restrict it through the token's ctx.
+  - *Rejected:* Tailscale or tailcat to reach the VM directly. tailcat has no ESP32 port, and the C Tailscale client (MicroLink) is third-party and needs RAM the coin does not have.
+  - *Original decision (2026-10-09), superseded:* the device sends to the phone over BLE; the phone talks to any server.
   - *Rejected:* device → server over Wi-Fi as the primary path. It only works on known networks, joining Wi-Fi and setting up TLS costs far more battery per clip than BLE, and server credentials would live on the device.
   - Device Wi-Fi stays for firmware updates and time, and possibly as an at-home fallback later.
 - **D11 Nordic Android-BLE-Library 2.x.**
