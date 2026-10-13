@@ -81,4 +81,5 @@ Not the hardware:
 - **Display.** LVGL's flushes go to the page; QSPI timing, tearing and the TE line are not modelled.
 - **Power loss.** Cutting power kills the process: a clip loses what was in the C library's buffer, which tests the recovery, but not every way a flash write can tear.
 - **Clock.** Time of day survives deep sleep but not a restart or watchdog reset; the chip keeps it through both.
-- **Not simulated yet:** Wi-Fi and OTA (firmware phase 7).
+- **Wi-Fi.** No radio and no delivery: clips always go to the phone. The on-coin setup screens (Settings > Wi-Fi) run against made-up networks (`coin/src/net_sim.c`): "Home" takes the password `coinai-sim`, "Office" never gives an address, the open ones join, and a hidden "Lab" can be typed in.
+- **Not simulated yet:** OTA (firmware phase 7).

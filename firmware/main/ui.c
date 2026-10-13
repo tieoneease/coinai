@@ -10,10 +10,12 @@
 #include "clipstore.h"
 #include "display.h"
 #include "esp_app_desc.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "eyes.h"
 #include "input.h"
+#include "kbd.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -54,12 +56,14 @@ typedef enum {
     // content: dismissed by BOOT or a swipe; the idle timeout applies
     M_REPLY, M_FAIL, M_SENT, M_SAVED, M_NOSPEECH, M_DISCARDED, M_PAIRED, M_PAIRFAIL, M_CONTROLS, M_RECENT,
     M_DETAIL, M_BRIGHT, M_SETTINGS, M_PHONE, M_ABOUT, M_POWERCONF,
+    M_WIFI, M_NETFORGET, M_SCAN, M_KBD, M_JOIN,  // Wi-Fi setup (BOOT goes back a step)
 } ui_mode_t;
 
 static const char *MODE_NAMES[] = {
     "boot", "off", "bye", "face", "listen", "send", "think", "away", "drowsy", "powerhold", "pair",
     "reply", "fail", "sent", "saved", "nospeech", "discarded", "paired", "pairfail", "controls", "recent",
     "detail", "bright", "settings", "phone", "about", "powerconf",
+    "wifi", "netforget", "scan", "kbd", "join",
 };
 
 static bool is_content(ui_mode_t m)
@@ -111,7 +115,7 @@ static bool s_drowsy_done;  // this idle period's drowsy flow has started
 
 enum {
     IT_STATUS, IT_CHIP, IT_CHIP_H, IT_TIMER, IT_HINT, IT_CAP, IT_BODY, IT_SUB, IT_PASS,
-    IT_TILE0, IT_TILE1, IT_TILE2, IT_TILE3, IT_ROW0, IT_ROW1, IT_ROW2, IT_ROW3, IT_VALUE,
+    IT_TILE0, IT_TILE1, IT_TILE2, IT_TILE3, IT_ROW0, IT_ROW1, IT_ROW2, IT_ROW3, IT_VALUE, IT_PILL,
     IT_HEARD0, IT_LINE0 = IT_HEARD0 + HEARD_LINES, IT_COUNT = IT_LINE0 + BODY_LINES,
 };
 
@@ -588,8 +592,8 @@ static lv_obj_t *build_tile(int i)
     return t;
 }
 
-#define ROW_Y0 178
-#define ROW_DY 80
+// The row list on screen now (build_row, on_tap): its first row's centre and the spacing.
+static int s_row_y0 = 178, s_row_dy = 80;
 
 static lv_obj_t *build_row(int i, const char *title, const char *sub, bool divider)
 {
@@ -604,7 +608,7 @@ static lv_obj_t *build_row(int i, const char *title, const char *sub, bool divid
     lv_label_set_long_mode(lt, LV_LABEL_LONG_MODE_DOTS);  // one line, ending in "..."
     lv_obj_set_size(lt, 320, lv_font_get_line_height(F24));
     label(r, F16, COL_DIM, sub);
-    lv_obj_align(r, LV_ALIGN_TOP_MID, 0, ROW_Y0 + i * ROW_DY - 24);
+    lv_obj_align(r, LV_ALIGN_TOP_MID, 0, s_row_y0 + i * s_row_dy - 24);
     if (divider) {
         lv_obj_t *d = box(r);
         lv_obj_set_size(d, 300 - i * 30, 2);
@@ -1203,6 +1207,8 @@ static float f_recent(int k)
         eyes_set_expr(EXPR_NEUTRAL, M_MOOD);
         eyes_auto(true, false);
         eyes_look(0, 24, M_MOOD);
+        s_row_y0 = 178;
+        s_row_dy = 80;
         s_nrows = recent_rows(titles, subs, s_row_reply);
         return 0.07f;
     }
@@ -1277,24 +1283,42 @@ static float f_bright(int k)
 
 static const uint16_t IDLE_CHOICES[] = {15, 30, 60, 120, 300};
 
+#define SETTINGS_ROWS 4
+
 static float f_settings(int k)
 {
-    static char sub0[24], sub1[32], sub2[40];
+    static char sub0[48], sub1[24], sub2[32], sub3[40];
     if (k == 0) {
         s_mode = M_SETTINGS;
         items_hide_except(0);
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_rim_track(false);
         eyes_layout(LAYOUT_HEADER, M_LAYOUT);
         eyes_set_expr(EXPR_NEUTRAL, M_MOOD);
+        eyes_auto(true, false);
         eyes_look(0, 24, M_MOOD);
-        snprintf(sub0, sizeof sub0, "%u s - tap to change", settings_get(SET_IDLE_S));
+        s_row_y0 = 176;
+        s_row_dy = 66;
+        char saved[NET_MAX_NETWORKS][33];
+        int cur, n = net_saved(saved, NET_MAX_NETWORKS, &cur);
+        if (cur >= 0) {
+            char ssid[33];
+            ascii_text(ssid, sizeof ssid, saved[cur]);
+            snprintf(sub0, sizeof sub0, "%.24s - connected", ssid);
+        } else if (n) {
+            snprintf(sub0, sizeof sub0, "%d saved", n);
+        } else {
+            snprintf(sub0, sizeof sub0, "Not set up");
+        }
         snprintf(sub1, sizeof sub1, "%s", s_in.ble.connected ? "Connected" : "Not connected");
-        snprintf(sub2, sizeof sub2, "Version %.24s", esp_app_get_description()->version);
+        snprintf(sub2, sizeof sub2, "%u s - tap to change", settings_get(SET_IDLE_S));
+        snprintf(sub3, sizeof sub3, "Version %.24s", esp_app_get_description()->version);
         return 0.07f;
     }
-    if (k <= 3) {
-        const char *t[] = {"Screen timeout", "Phone", "About"};
-        const char *s[] = {sub0, sub1, sub2};
-        item_attach(IT_ROW0 + k - 1, build_row(k - 1, t[k - 1], s[k - 1], k < 3), 60);
+    if (k <= SETTINGS_ROWS) {
+        const char *t[] = {"Wi-Fi", "Phone", "Screen timeout", "About"};
+        const char *s[] = {sub0, sub1, sub2, sub3};
+        item_attach(IT_ROW0 + k - 1, build_row(k - 1, t[k - 1], s[k - 1], k < SETTINGS_ROWS), 60);
         return 0.05f;
     }
     return FLOW_END;
@@ -1364,6 +1388,416 @@ static float f_about(int k)
         item_attach(IT_BODY, l, 14);
         return FLOW_END;
     }
+    }
+}
+
+// ---------- Wi-Fi setup: saved networks, a scan, the keyboard, joining ----------
+
+#define SCAN_PER_PAGE 4
+
+EXT_RAM_BSS_ATTR static net_ap_t s_aps[NET_UI_MAX_APS];  // the last scan's networks
+static int s_naps;  // -1: the scan failed
+static int s_scan_page, s_page_dir = 1;
+static bool s_scan_listed;  // M_SCAN shows its result (not "Looking...")
+static bool s_paging;
+static char s_join_ssid[33];
+static bool s_join_secure;  // the network wants a password
+static bool s_join_saved;   // join with the saved password
+static char s_pw[65];       // the password typed: kept for a retry, wiped on leaving the setup
+static bool s_join_waiting;
+static net_join_t s_join_result;
+static net_sambot_t s_join_sambot;
+static lv_obj_t *s_kbd;
+static bool s_kbd_name;     // the keyboard asks for a network's name ("Other network")
+static bool s_kbd_shown;    // the password is visible
+static char s_forget_ssid[33];
+EXT_RAM_BSS_ATTR static char s_saved[NET_MAX_NETWORKS][33];
+static int s_nsaved, s_saved_cur, s_pill_y;
+
+static float f_wifi(int k);
+static float f_scan(int k);
+static float f_scan_list(int k);
+static float f_kbd(int k);
+static float f_join(int k);
+
+// One line of text, cut with "..." at `width`.
+static lv_obj_t *build_line(const char *utf8, int y, int width, const lv_font_t *font, uint32_t color)
+{
+    char t[96];
+    ascii_text(t, sizeof t, utf8);
+    lv_obj_t *l = label(s_scr, font, color, "");
+    lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_size(l, width, lv_font_get_line_height(font));
+    lv_label_set_text(l, t);
+    place(l, y);
+    return l;
+}
+
+// A button: amber for the screen's main action, else quiet.
+static lv_obj_t *build_pill(const char *text, int y, bool primary)
+{
+    lv_obj_t *p = box(s_scr);
+    lv_obj_set_size(p, 200, 48);
+    lv_obj_set_style_radius(p, 24, 0);
+    lv_obj_set_style_bg_color(p, lv_color_hex(primary ? COL_AMBER : COL_TILE), 0);
+    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_t *l = label(p, F20, primary ? 0x000000 : COL_TEXT, text);
+    lv_obj_center(l);
+    place(p, y);
+    return p;
+}
+
+static float f_wifi(int k)
+{
+    static char subs[NET_MAX_NETWORKS][16];
+    if (k == 0) {
+        s_mode = M_WIFI;
+        items_hide_except(0);
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_rim_track(false);
+        eyes_layout(LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr(EXPR_NEUTRAL, M_MOOD);
+        eyes_auto(true, false);
+        eyes_look(0, 24, M_MOOD);
+        s_nsaved = net_saved(s_saved, NET_MAX_NETWORKS, &s_saved_cur);
+        s_row_y0 = 176;
+        s_row_dy = s_nsaved == NET_MAX_NETWORKS ? 56 : 62;
+        s_pill_y = s_nsaved ? s_row_y0 + s_nsaved * s_row_dy + 14 : 340;
+        return 0.07f;
+    }
+    if (s_nsaved == 0 && k == 1) {
+        item_attach(IT_CAP, build_caption("No Wi-Fi yet", 196, F28, COL_TEXT), 14);
+        item_attach(IT_SUB, build_body("Add a network and the coin can send clips without the phone.", 244, 300, 60, F20,
+                                       COL_DIM), 14);
+        return 0.05f;
+    }
+    if (s_nsaved && k <= s_nsaved) {
+        int i = k - 1;
+        snprintf(subs[i], sizeof subs[i], "%s", i == s_saved_cur ? "Connected" : "Saved");
+        item_attach(IT_ROW0 + i, build_row(i, s_saved[i], subs[i], false), 60);
+        return 0.05f;
+    }
+    item_attach(IT_PILL, build_pill(LV_SYMBOL_PLUS "  Add network", s_pill_y, true), 30);
+    return FLOW_END;
+}
+
+static float f_netforget(int k)
+{
+    switch (k) {
+    case 0:
+        s_mode = M_NETFORGET;
+        items_hide_except(0);
+        eyes_layout(LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr(EXPR_WORRIED, M_MOOD);
+        eyes_look(0, 20, M_MOOD);
+        s_hold_down = false;
+        return 0.07f;
+    default:
+        item_attach(IT_BODY, build_line(s_forget_ssid, 200, 320, F28, COL_TEXT), 14);
+        item_attach(IT_SUB, build_body("Hold the screen for 2 s to forget this network.", 252, 320, 90, F20, COL_DIM), 14);
+        return FLOW_END;
+    }
+}
+
+static float f_netforgotten(int k)
+{
+    switch (k) {
+    case 0:
+        s_mode = M_PAIRFAIL;  // a plain message
+        items_hide_except(0);
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_rim_track(false);
+        eyes_set_expr(EXPR_SAD, M_DROOP);
+        item_attach(IT_BODY, build_caption("Network forgotten", 226, F28, COL_TEXT), 14);
+        return 1.6f;
+    default:
+        FLOW(f_wifi);
+        return FLOW_END;
+    }
+}
+
+static float f_scan(int k)
+{
+    switch (k) {
+    case 0:
+        s_mode = M_SCAN;
+        s_scan_listed = false;
+        items_hide_except(0);
+        eyes_layout(LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr(EXPR_FOCUS, M_MOOD);
+        eyes_auto(true, true);  // looking around
+        eyes_rim_track(false);
+        eyes_rim(RIM_ORBIT, lv_color_hex(COL_AMBER));
+        net_ui_scan();
+        return 0.07f;
+    default:
+        item_attach(IT_CAP, build_caption(net_busy() ? "Sending a clip first..." : "Looking for Wi-Fi...", 236, F24,
+                                          COL_TEXT), 14);
+        return FLOW_END;
+    }
+}
+
+static const struct {
+    const char *title, *hint;
+} JOIN_FAIL[] = {
+    [NET_JOIN_OK] = {"Connected", ""},
+    [NET_JOIN_WRONG_PASSWORD] = {"Password not accepted", "Tap to try again"},
+    [NET_JOIN_NOT_FOUND] = {"Network not found", "Tap to look again"},
+    [NET_JOIN_UNSUPPORTED] = {"Security doesn't match", "Tap to try again"},
+    [NET_JOIN_NO_IP] = {"Joined, but no address", "Tap to try again"},
+    [NET_JOIN_FAILED] = {"Couldn't join", "Tap to try again"},
+    [NET_JOIN_LOW_BATTERY] = {"Battery too low for Wi-Fi", "Charge, then tap to try again"},
+    [NET_JOIN_RADIO] = {"Wi-Fi didn't start", "Tap to try again"},
+};
+
+// The scan's result: a page of networks (and "Other network..." last), none, or a failure.
+static float f_scan_list(int k)
+{
+    static char subs[SCAN_PER_PAGE][40];
+    int total = s_naps + 1;
+    int first = s_scan_page * SCAN_PER_PAGE;
+    int n = total - first < SCAN_PER_PAGE ? total - first : SCAN_PER_PAGE;
+    if (k == 0) {
+        s_mode = M_SCAN;
+        s_scan_listed = true;
+        items_hide_except(0);
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_layout(LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr(s_naps > 0 ? EXPR_NEUTRAL : EXPR_WORRIED, M_MOOD);
+        eyes_auto(true, false);
+        eyes_look(0, 24, M_MOOD);
+        s_row_y0 = 176;
+        s_row_dy = 64;
+        if (s_naps <= 0) {
+            item_attach(IT_CAP, build_body(s_naps == 0 ? "No networks found" : JOIN_FAIL[s_join_result].title, 206, 320,
+                                           34, F28, COL_TEXT), 14);
+            item_attach(IT_HINT, build_caption("Tap to look again", 250, F20, COL_DIM), 14);
+            if (s_naps == 0) {  // a hidden network can still be typed in
+                s_pill_y = 330;
+                item_attach(IT_PILL, build_pill("Other network...", s_pill_y, false), 30);
+            }
+            return FLOW_END;
+        }
+        bool paging = s_paging;
+        s_paging = false;
+        return paging ? 0.14f : 0.07f;  // a new page: the old rows fade out first
+    }
+    if (k <= n) {
+        int i = k - 1, e = first + i;
+        if (e == s_naps) {
+            snprintf(subs[i], sizeof subs[i], "A hidden one: type its name");
+            item_attach(IT_ROW0 + i, build_row(i, "Other network...", subs[i], false), 50 * s_page_dir);
+        } else {
+            const net_ap_t *a = &s_aps[e];
+            const char *sig = a->rssi >= -60 ? "Strong" : a->rssi >= -72 ? "Good" : "Weak";
+            snprintf(subs[i], sizeof subs[i], "%s%s - %s", a->saved ? "Saved - " : "", sig,
+                     a->secure ? "password" : "open");
+            item_attach(IT_ROW0 + i, build_row(i, a->ssid, subs[i], false), 50 * s_page_dir);
+        }
+        return 0.04f;
+    }
+    if (first + n < total) {
+        item_attach(IT_HINT, build_caption("Swipe up for more", 424, F16, COL_DIM), 14);
+    } else if (s_scan_page > 0) {
+        item_attach(IT_HINT, build_caption("Swipe down to go back", 424, F16, COL_DIM), 14);
+    }
+    return FLOW_END;
+}
+
+static void scan_pick(int e)
+{
+    s_kbd_name = false;
+    memset(s_pw, 0, sizeof s_pw);
+    if (e >= s_naps) {  // "Other network...": its name, then its password (or none)
+        s_join_ssid[0] = 0;
+        s_join_secure = false;
+        s_join_saved = false;
+        s_kbd_name = true;
+        FLOW(f_kbd);
+        return;
+    }
+    snprintf(s_join_ssid, sizeof s_join_ssid, "%s", s_aps[e].ssid);
+    s_join_secure = s_aps[e].secure;
+    s_join_saved = s_aps[e].saved;
+    if (s_join_saved || !s_join_secure) {
+        FLOW(f_join);
+    } else {
+        FLOW(f_kbd);
+    }
+}
+
+static bool s_aps_has(const char *ssid)
+{
+    for (int i = 0; i < s_naps; i++) {
+        if (strcmp(s_aps[i].ssid, ssid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void kbd_key_cb(int x, int y, void *ctx)
+{
+    if (s_kbd_name || s_kbd_shown) {  // hidden passwords: eyes shut
+        eyes_look((x - C) * 40.0f / 200, 26 + (y - 260) * 10.0f / 110, M_SACCADE);
+    }
+}
+
+static void kbd_reveal_cb(bool shown, void *ctx)
+{
+    s_kbd_shown = shown;
+    eyes_set_expr(shown ? EXPR_FOCUS : EXPR_CLOSED, M_MOOD);
+    eyes_look(0, 26, M_MOOD);
+}
+
+static void kbd_done_cb(const char *text, void *ctx)
+{
+    if (s_kbd_name) {
+        snprintf(s_join_ssid, sizeof s_join_ssid, "%s", text);
+        s_kbd_name = false;
+        FLOW(f_kbd);  // its password next
+        return;
+    }
+    size_t n = strlen(text);
+    if (!s_join_secure && n > 0 && n < 8) {
+        kbd_set_hint(s_kbd, "8 or more, or none if open", true);
+        return;
+    }
+    snprintf(s_pw, sizeof s_pw, "%s", text);
+    FLOW(f_join);
+}
+
+static float f_kbd(int k)
+{
+    if (k == 0) {
+        s_mode = M_KBD;
+        items_hide_except(0);
+        if (s_kbd) {
+            lv_obj_delete(s_kbd);
+            s_kbd = NULL;
+        }
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_rim_track(false);
+        eyes_layout(LAYOUT_PEEK, M_LAYOUT);
+        eyes_auto(true, false);
+        s_kbd_shown = false;
+        eyes_set_expr(s_kbd_name ? EXPR_FOCUS : EXPR_CLOSED, M_MOOD);
+        eyes_look(0, 26, M_MOOD);
+        return 0.1f;  // the eyes move up out of the way first
+    }
+    char title[64], ssid[33];
+    ascii_text(ssid, sizeof ssid, s_join_ssid);
+    kbd_cfg_t cfg = {
+        .hint = "BOOT to go back",
+        .on_done = kbd_done_cb,
+        .on_key = kbd_key_cb,
+        .on_reveal = kbd_reveal_cb,
+    };
+    if (s_kbd_name) {
+        cfg.kind = KBD_TEXT;
+        cfg.title = "Network name";
+        cfg.min_len = 1;
+        cfg.max_len = 32;
+    } else {
+        snprintf(title, sizeof title, "Password for %s", ssid);
+        cfg.kind = KBD_PASSWORD;
+        cfg.title = title;
+        cfg.min_len = s_join_secure ? 8 : 0;
+        cfg.max_len = 64;
+        cfg.initial = s_pw;
+        cfg.placeholder = s_join_secure ? "" : "None if open";
+    }
+    s_kbd = kbd_create(s_scr, &cfg);
+    return FLOW_END;
+}
+
+static float f_join(int k)
+{
+    switch (k) {
+    case 0:
+        s_mode = M_JOIN;
+        items_hide_except(0);
+        eyes_layout(LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr(EXPR_FOCUS, M_MOOD);
+        eyes_auto(true, false);
+        eyes_look(0, 20, M_MOOD);
+        eyes_rim_track(false);
+        eyes_rim(RIM_ORBIT, lv_color_hex(COL_AMBER));
+        net_ui_join(s_join_ssid, s_join_saved ? NULL : s_pw);
+        s_join_waiting = true;
+        return 0.07f;
+    default:
+        item_attach(IT_CAP, build_line(s_join_ssid, 214, 320, F28, COL_TEXT), 14);
+        item_attach(IT_SUB, build_caption(net_busy() ? "Sending a clip first..." : "Joining...", 258, F20, COL_DIM), 14);
+        return FLOW_END;
+    }
+}
+
+static float f_join_result(int k)
+{
+    static const char *const SAMBOT[] = {
+        [NET_SAMBOT_OK] = "SamBot answers",
+        [NET_SAMBOT_NO_KEY] = "No SamBot key on the coin yet",
+        [NET_SAMBOT_KEY_REFUSED] = "SamBot refused the coin's key",
+        [NET_SAMBOT_UNREACHED] = "SamBot did not answer",
+    };
+    bool ok = s_join_result == NET_JOIN_OK;
+    switch (k) {
+    case 0:
+        eyes_rim(RIM_OFF, lv_color_black());
+        items_hide_except(0);
+        if (ok) {
+            eyes_set_expr(s_join_sambot == NET_SAMBOT_OK ? EXPR_JOY : EXPR_CONTENT, M_POP);
+            item_attach(IT_CAP, build_caption("Connected", 214, F28, COL_TEXT), 14);
+            item_attach(IT_SUB, build_body(SAMBOT[s_join_sambot], 256, 300, 60, F20, COL_DIM), 14);
+            return 2.5f;
+        }
+        eyes_set_expr(EXPR_SAD, M_DROOP);
+        item_attach(IT_CAP, build_body(JOIN_FAIL[s_join_result].title, 214, 320, 34, F28, COL_TEXT), 14);
+        item_attach(IT_SUB, build_caption(JOIN_FAIL[s_join_result].hint, 258, F20, COL_DIM), 14);
+        return FLOW_END;
+    default:
+        FLOW(f_wifi);
+        return FLOW_END;
+    }
+}
+
+static float f_kbd_demo(int k)
+{
+    snprintf(s_join_ssid, sizeof s_join_ssid, "coinai-demo");  // `ui show kbd`: a made-up network
+    s_join_secure = true;
+    s_join_saved = false;
+    s_kbd_name = false;
+    memset(s_pw, 0, sizeof s_pw);
+    FLOW(f_kbd);
+    return FLOW_END;
+}
+
+static void join_retry(void)
+{
+    switch (s_join_result) {
+    case NET_JOIN_OK:
+    case NET_JOIN_LOW_BATTERY:
+        FLOW(f_wifi);
+        break;
+    case NET_JOIN_NOT_FOUND:
+        FLOW(f_scan);
+        break;
+    case NET_JOIN_NO_IP:
+    case NET_JOIN_RADIO:
+        FLOW(f_join);
+        break;
+    default:  // the password, again
+        if (s_join_saved) {
+            s_join_saved = false;
+            memset(s_pw, 0, sizeof s_pw);
+        }
+        if (s_join_secure || s_pw[0] || !s_aps_has(s_join_ssid)) {
+            FLOW(f_kbd);
+        } else {
+            FLOW(f_join);
+        }
+        break;
     }
 }
 
@@ -1934,7 +2368,11 @@ static void handle_event(const ui_msg_t *m)
         }
         break;
     case UI_EV_BOOT_DOWN:
-        if (is_content(s_mode) || s_mode == M_THINK || s_mode == M_SEND || s_mode == M_AWAY) {
+        if (s_mode == M_KBD || (s_mode == M_JOIN && !s_join_waiting)) {
+            FLOW(s_naps > 0 ? f_scan_list : f_wifi);
+        } else if (s_mode == M_SCAN || s_mode == M_JOIN || s_mode == M_NETFORGET) {
+            FLOW(f_wifi);
+        } else if (is_content(s_mode) || s_mode == M_THINK || s_mode == M_SEND || s_mode == M_AWAY) {
             go_face();
         } else if (s_mode == M_FACE && !s_flow) {
             FLOW(f_glance_boot);
@@ -2090,6 +2528,45 @@ static void react(void)
             }
         }
         break;
+    case M_SCAN:
+        if (!s_scan_listed) {
+            net_ui_state_t st = net_ui_state();
+            if (st == NET_UI_SCANNED) {
+                s_naps = net_ui_aps(s_aps, NET_UI_MAX_APS);
+                s_scan_page = 0;
+                s_page_dir = 1;
+                FLOW(f_scan_list);
+            } else if (st == NET_UI_DONE) {
+                s_join_result = net_ui_result(NULL);  // low battery, or Wi-Fi did not start
+                s_naps = -1;
+                FLOW(f_scan_list);
+            }
+        }
+        break;
+    case M_JOIN:
+        if (s_join_waiting) {
+            net_ui_state_t st = net_ui_state();
+            lv_obj_t *sub = item_get(IT_SUB);
+            if (st == NET_UI_CHECKING && sub) {
+                set_text(sub, "Asking SamBot...");
+            } else if (st == NET_UI_JOINING && sub) {
+                set_text(sub, net_busy() ? "Sending a clip first..." : "Joining...");
+            } else if (st == NET_UI_DONE) {
+                s_join_waiting = false;
+                s_join_result = net_ui_result(&s_join_sambot);
+                FLOW(f_join_result);
+            }
+        }
+        break;
+    case M_NETFORGET:
+        if (s_hold_down && s_now - s_hold_t0 >= 2.0f) {
+            s_hold_down = false;
+            net_wifi_forget(s_forget_ssid);
+            FLOW(f_netforgotten);
+        } else if (s_hold_down) {
+            eyes_rim_progress((s_now - s_hold_t0) / 2.0f);
+        }
+        break;
     case M_PHONE:
         if (s_hold_down && s_now - s_hold_t0 >= 2.0f) {
             s_hold_down = false;
@@ -2219,7 +2696,7 @@ static void on_tap(int x, int y)
         break;
     case M_RECENT:
         for (int i = 0; i < s_nrows; i++) {
-            if (abs(y - (ROW_Y0 + i * ROW_DY)) < ROW_DY / 2 && s_row_reply[i] >= 0) {
+            if (abs(y - (s_row_y0 + i * s_row_dy)) < s_row_dy / 2 && s_row_reply[i] >= 0) {
                 s_detail = s_row_reply[i];
                 FLOW(f_detail);
                 return;
@@ -2227,9 +2704,13 @@ static void on_tap(int x, int y)
         }
         break;
     case M_SETTINGS:
-        for (int i = 0; i < 3; i++) {
-            if (abs(y - (ROW_Y0 + i * ROW_DY)) < ROW_DY / 2) {
+        for (int i = 0; i < SETTINGS_ROWS; i++) {
+            if (abs(y - (s_row_y0 + i * s_row_dy)) < s_row_dy / 2) {
                 if (i == 0) {
+                    FLOW(f_wifi);
+                } else if (i == 1) {
+                    FLOW(f_phone);
+                } else if (i == 2) {
                     uint16_t cur = settings_get(SET_IDLE_S), next = IDLE_CHOICES[0];
                     for (size_t j = 0; j < sizeof IDLE_CHOICES / sizeof IDLE_CHOICES[0]; j++) {
                         if (IDLE_CHOICES[j] > cur) {
@@ -2238,20 +2719,56 @@ static void on_tap(int x, int y)
                         }
                     }
                     settings_set(SET_IDLE_S, next);
-                    lv_obj_t *r = item_get(IT_ROW0);
+                    lv_obj_t *r = item_get(IT_ROW0 + 2);
                     if (r) {
                         char sub[24];
                         snprintf(sub, sizeof sub, "%u s - tap to change", next);
                         set_text(lv_obj_get_child(r, 1), sub);
                     }
                     eyes_ripple(x, y);
-                } else if (i == 1) {
-                    FLOW(f_phone);
                 } else {
                     FLOW(f_about);
                 }
                 return;
             }
+        }
+        break;
+    case M_WIFI:
+        for (int i = 0; i < s_nsaved; i++) {
+            if (abs(y - (s_row_y0 + i * s_row_dy)) < s_row_dy / 2) {
+                snprintf(s_forget_ssid, sizeof s_forget_ssid, "%s", s_saved[i]);
+                FLOW(f_netforget);
+                return;
+            }
+        }
+        if (abs(y - s_pill_y) < 34 && abs(x - C) < 120) {
+            eyes_ripple(x, y);
+            FLOW(f_scan);
+        }
+        break;
+    case M_SCAN:
+        if (!s_scan_listed) {
+            break;
+        }
+        if (s_naps == 0 && abs(y - s_pill_y) < 34 && abs(x - C) < 120) {
+            scan_pick(0);  // "Other network..."
+            break;
+        }
+        if (s_naps <= 0) {
+            FLOW(f_scan);  // look again
+            break;
+        }
+        for (int i = 0; i < SCAN_PER_PAGE; i++) {
+            int e = s_scan_page * SCAN_PER_PAGE + i;
+            if (e <= s_naps && abs(y - (s_row_y0 + i * s_row_dy)) < s_row_dy / 2) {
+                scan_pick(e);
+                return;
+            }
+        }
+        break;
+    case M_JOIN:
+        if (!s_join_waiting) {
+            join_retry();
         }
         break;
     default:
@@ -2287,6 +2804,24 @@ static void on_swipe(int dir)  // +1 down, -1 up
         break;
     case M_BRIGHT:
         break;  // dragging sets the value
+    case M_SCAN:
+        if (s_scan_listed && s_naps > 0 && dir < 0 && (s_scan_page + 1) * SCAN_PER_PAGE <= s_naps) {
+            s_scan_page++;
+            s_page_dir = 1;
+            s_paging = true;
+            FLOW(f_scan_list);
+        } else if (s_scan_listed && s_naps > 0 && dir > 0 && s_scan_page > 0) {
+            s_scan_page--;
+            s_page_dir = -1;
+            s_paging = true;
+            FLOW(f_scan_list);
+        } else if (dir > 0) {
+            FLOW(f_wifi);
+        }
+        break;
+    case M_KBD:
+    case M_JOIN:
+        break;  // only BOOT leaves these
     default:
         if (is_content(s_mode)) {
             go_face();
@@ -2310,11 +2845,11 @@ static void touch_cb(lv_event_t *e)
         s_press_t = s_now;
         s_pressed = true;
         s_drag_base = s_bright;
-        if ((s_mode == M_POWERCONF || s_mode == M_PHONE) && !s_hold_down) {
+        if ((s_mode == M_POWERCONF || s_mode == M_PHONE || s_mode == M_NETFORGET) && !s_hold_down) {
             s_hold_down = true;
             s_hold_t0 = s_now;
             eyes_rim_track(true);
-            eyes_rim(RIM_PROGRESS, lv_color_hex(s_mode == M_PHONE ? COL_REC : COL_TEXT));
+            eyes_rim(RIM_PROGRESS, lv_color_hex(s_mode == M_POWERCONF ? COL_TEXT : COL_REC));
             eyes_rim_progress(0);
         }
     } else if (code == LV_EVENT_PRESSING && s_pressed && s_mode == M_BRIGHT) {
@@ -2556,6 +3091,13 @@ static void tick_cb(lv_timer_t *t)
         }
     }
     flow_run();
+    if (s_kbd && s_mode != M_KBD) {
+        lv_obj_delete(s_kbd);  // wipes its text
+        s_kbd = NULL;
+    }
+    if (s_pw[0] && s_mode != M_KBD && s_mode != M_JOIN) {
+        memset(s_pw, 0, sizeof s_pw);
+    }
     eyes_step(dt);
     items_step(dt);
     if (s_now < s_bench_until) {
@@ -2676,7 +3218,8 @@ void ui_screen_on(void)
 
 bool ui_keep_awake(void)
 {
-    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD;
+    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD ||
+           ((s_mode == M_SCAN || s_mode == M_JOIN) && net_ui_busy());
 }
 
 void ui_set_drowsy(bool drowsy)
@@ -2692,7 +3235,8 @@ int ui_console(int argc, char **argv)
 {
     if (argc < 2) {
         printf("ui perf [reset] | ui demo <talk|fail|away|nospeech|discard|pair|power|sleep|lowbatt> | "
-               "ui show <face|controls|recent|settings|about|bright> | ui expr <name> | ui state\n");
+               "ui show <face|controls|recent|settings|about|bright|wifi|scan|kbd> | ui expr <name> | ui state | "
+               "ui tap <x> <y> | ui swipe <up|down> | ui type <text> | ui done\n");
         return 1;
     }
     if (bsp_display_lock(1000) != ESP_OK) {
@@ -2741,9 +3285,11 @@ int ui_console(int argc, char **argv)
         const struct {
             const char *name;
             flow_fn fn;
-        } shows[] = {{"face", f_face}, {"controls", f_controls}, {"recent", f_recent}, {"settings", f_settings},
-                     {"about", f_about}, {"bright", f_bright}};
+        } shows[] = {{"face", f_face},     {"controls", f_controls}, {"recent", f_recent}, {"settings", f_settings},
+                     {"about", f_about},   {"bright", f_bright},     {"wifi", f_wifi},     {"scan", f_scan},
+                     {"kbd", f_kbd_demo}};
         rc = 1;
+        lv_display_trigger_activity(NULL);
         for (size_t i = 0; i < sizeof shows / sizeof shows[0]; i++) {
             if (strcmp(argv[2], shows[i].name) == 0) {
                 flow_start(shows[i].fn, "f_show");
@@ -2776,6 +3322,31 @@ int ui_console(int argc, char **argv)
             eyes_rim_progress((float)atof(argv[2]) / 100);
         }
         printf("ok\n");
+    } else if (strcmp(argv[1], "tap") == 0 && argc > 3) {
+        lv_display_trigger_activity(NULL);  // as a touch: the idle timeout restarts
+        on_tap(atoi(argv[2]), atoi(argv[3]));
+        printf("ok\n");
+    } else if (strcmp(argv[1], "swipe") == 0 && argc > 2) {
+        lv_display_trigger_activity(NULL);
+        on_swipe(strcmp(argv[2], "down") == 0 ? 1 : -1);
+        printf("ok\n");
+    } else if (strcmp(argv[1], "type") == 0 && argc > 2) {
+        // Tests and demos only: the console keeps its own copy of the line.
+        lv_display_trigger_activity(NULL);
+        if (!s_kbd) {
+            printf("no keyboard\n");
+            rc = 1;
+        } else {
+            for (int i = 2; i < argc; i++) {
+                kbd_type(s_kbd, i > 2 ? " " : "");
+                kbd_type(s_kbd, argv[i]);
+            }
+            printf("ok\n");
+        }
+    } else if (strcmp(argv[1], "done") == 0) {
+        lv_display_trigger_activity(NULL);
+        rc = s_kbd && kbd_done(s_kbd) ? 0 : 1;
+        printf(rc ? "not done\n" : "ok\n");
     } else if (strcmp(argv[1], "state") == 0) {
         printf("ui: mode %s, flow %s, expr %s, eyes y %.0f, demo %s\n", MODE_NAMES[s_mode], s_flow ? s_flow_name : "-",
                eyes_expr_name(eyes_expr()), eyes_y(), DEMO_NAMES[s_demo]);

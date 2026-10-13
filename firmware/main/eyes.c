@@ -236,6 +236,7 @@ static const layout_pos_t LAYOUTS[] = {
     [LAYOUT_LISTEN] = {233, 212, 1.06f},
     [LAYOUT_HEADER] = {233, 100, 0.42f},
     [LAYOUT_FOOTER] = {233, 388, 0.36f},
+    [LAYOUT_PEEK] = {233, 50, 0.25f},
 };
 
 static motion_t lagged(motion_t m, int eye)

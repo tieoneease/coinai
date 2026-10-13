@@ -204,6 +204,27 @@ static bool write_all(esp_http_client_handle_t h, const char *buf, int len)
     return true;
 }
 
+sambot_rc_t sambot_check(sambot_err_t *err)
+{
+    set_err(err, 0, "", NULL);
+    esp_http_client_handle_t h = client("/health", HTTP_METHOD_GET, 10000);
+    if (!h) {
+        set_err(err, 0, "no HTTP client%s", NULL);
+        return SAMBOT_NET;
+    }
+    sambot_rc_t rc = SAMBOT_NET;
+    esp_err_t e = esp_http_client_open(h, 0);
+    if (e == ESP_OK && esp_http_client_fetch_headers(h) >= 0) {
+        int status = esp_http_client_get_status_code(h);
+        rc = status == 200 ? SAMBOT_OK : auth_status(status) ? SAMBOT_AUTH : SAMBOT_NET;
+        set_err(err, status, "HTTP status%s", NULL);
+    } else {
+        set_err(err, 0, "%s", esp_err_to_name(e == ESP_OK ? ESP_FAIL : e));
+    }
+    esp_http_client_cleanup(h);
+    return rc;
+}
+
 sambot_rc_t sambot_transcribe(const char *path, char **text, sambot_progress_t progress, void *ctx,
                               sambot_err_t *err)
 {

@@ -125,3 +125,108 @@ def test_real_coin(rig):
     post(f'{api}/api/input', {'touch': {'pressed': True, 'x': 233, 'y': 350}})
     post(f'{api}/api/input', {'touch': {'pressed': False, 'x': 233, 'y': 350}})
     wait_line(api, seq, r'touch down at 233,350')
+
+
+# The on-screen keyboard's keys (firmware/main/kbd.c): row centres and the first key's left edge.
+KEY_ROWS = {0: (190, 20, 'qwertyuiop', '1234567890'), 1: (240, 42, 'asdfghjkl', '-/:;()$&@"'),
+            2: (290, 85, 'zxcvbnm', '.,?!\'')}
+PAGE_KEY, BKSP, DONE = (93, 340), (411, 290), (356, 340)
+
+
+def key_xy(ch):
+    """Centre of a letter key (letters page) or a digit/symbol key (the 123 page), and which page."""
+    for row, (y, x0, letters, digits) in KEY_ROWS.items():
+        if ch in letters:
+            return x0 + letters.index(ch) * 43 + 19, y, 'abc'
+        if ch in digits:
+            x0 = 20 if row < 2 else 85 + (297 - 5 * 56 - 16) // 2
+            pitch = 43 if row < 2 else 60
+            w = 39 if row < 2 else 56
+            return x0 + digits.index(ch) * pitch + w // 2, y, '123'
+    raise KeyError(ch)
+
+
+def touch(api, x, y, pressed=True):
+    post(f'{api}/api/input', {'touch': {'pressed': pressed, 'x': x, 'y': y}})
+    time.sleep(0.07)  # longer than LVGL's 30 ms input poll
+
+
+def tap(api, x, y):
+    touch(api, x, y)
+    touch(api, x, y, False)
+
+
+def ui_mode(api):
+    seq = console_seq(api)
+    post(f'{api}/api/console', {'line': 'ui state'})
+    return wait_line(api, seq, r'ui: mode (\w+)').group(1)
+
+
+def test_wifi_setup_by_touch(rig):
+    """Settings > Wi-Fi > Add network on the touch screen alone: the scan list, the keyboard (pages, backspace,
+    slide-to-correct), a wrong password and a retry that keeps the text, joining, and hold-to-forget."""
+    phone_port, api, tmp = rig
+    post(f'{api}/api/console', {'line': 'ui show settings'})
+    wait(lambda: ui_mode(api) == 'settings', what='settings')
+    tap(api, 233, 176)  # Wi-Fi
+    wait(lambda: ui_mode(api) == 'wifi', what='Wi-Fi screen')
+    tap(api, 233, 340)  # Add network (no network saved yet)
+    seq = console_seq(api)
+    wait(lambda: ui_mode(api) == 'scan', what='scan')
+    time.sleep(2.6)  # the simulated scan takes 2 s
+    tap(api, 233, 176)  # the strongest network: "Home"
+    wait(lambda: ui_mode(api) == 'kbd', what='keyboard')
+    time.sleep(0.4)
+
+    def type_text(text, page='abc'):
+        for ch in text:
+            x, y, want = key_xy(ch)
+            if want != page:
+                tap(api, *PAGE_KEY)
+                page = want
+            tap(api, x, y)
+        return page
+
+    # A wrong password first: Done, then "Password not accepted"; a tap brings the keyboard back with the text.
+    type_text('wrongpass')
+    tap(api, *DONE)
+    wait_line(api, seq, r'setup join "Home": result 1', timeout=10)
+    wait(lambda: ui_mode(api) == 'join', what='result screen')
+    tap(api, 233, 240)
+    wait(lambda: ui_mode(api) == 'kbd', what='keyboard again')
+    time.sleep(0.4)
+    post(f'{api}/api/input', {'touch': {'pressed': True, 'x': BKSP[0], 'y': BKSP[1]}})
+    time.sleep(2.0)  # held: repeats until the field is empty
+    post(f'{api}/api/input', {'touch': {'pressed': False, 'x': BKSP[0], 'y': BKSP[1]}})
+    time.sleep(0.1)
+
+    # "coinai-sim", with "-" from the 123 page, an extra letter taken back, and "s" reached by sliding from "a".
+    page = type_text('coinai')
+    page = type_text('-', page)
+    tap(api, *PAGE_KEY)  # abc
+    x, y, _ = key_xy('a')
+    touch(api, x, y)
+    touch(api, x + 22, y)
+    touch(api, x + 43, y)  # now on "s"
+    touch(api, x + 43, y, False)
+    type_text('iqm')
+    tap(api, *BKSP)  # the "m"
+    tap(api, *BKSP)  # the "q"
+    type_text('m')
+    tap(api, *DONE)
+    wait_line(api, seq, r'setup join "Home": result 0', timeout=10)
+    wait(lambda: ui_mode(api) == 'wifi', timeout=8, what='back to the Wi-Fi screen')
+
+    # The network is saved; holding its row's screen for 2 s forgets it.
+    seq = console_seq(api)
+    post(f'{api}/api/console', {'line': 'wifi'})
+    wait_line(api, seq, r'network 0: "Home", connected')
+    tap(api, 233, 176)
+    wait(lambda: ui_mode(api) == 'netforget', what='forget screen')
+    post(f'{api}/api/input', {'touch': {'pressed': True, 'x': 233, 'y': 300}})
+    time.sleep(2.4)
+    post(f'{api}/api/input', {'touch': {'pressed': False, 'x': 233, 'y': 300}})
+    wait(lambda: ui_mode(api) == 'wifi', timeout=5, what='Wi-Fi screen after forgetting')
+    seq = console_seq(api)
+    post(f'{api}/api/console', {'line': 'wifi'})
+    wait_line(api, seq, r'0 networks stored')

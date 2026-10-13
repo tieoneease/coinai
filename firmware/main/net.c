@@ -34,6 +34,7 @@ static const char *TAG = "net";
 #define FAST_JOIN_MS    4000    // the last network, on its known channel and access point
 #define JOIN_MS         10000
 #define LINGER_MS       20000   // Wi-Fi stays up this long after the last delivery
+#define UI_JOIN_MS      15000   // on-coin setup: a new network (no known channel; WPA3 is slower)
 #define BACKOFF_MIN_S   30      // background retries after a failure; a new recording always tries
 #define BACKOFF_MAX_S   600
 #define DEFAULT_URL     "https://sambot.exe.xyz"
@@ -86,6 +87,20 @@ static bool s_wifi_init, s_wifi_started, s_sntp;
 static int64_t s_linger_until_us;
 static volatile bool s_wifi_up;
 static bool s_tried;  // Wi-Fi was switched on in this pass of the task
+static volatile uint8_t s_disc_reason;  // the last disconnect's reason (wifi_err_reason_t)
+static volatile bool s_assoc;           // associated since the last connect attempt began
+static uint8_t s_fail_reason;           // try_connect's last failure: s_disc_reason then (before
+static bool s_fail_assoc;               // its own esp_wifi_disconnect() adds one: reason 36)
+
+// On-coin setup (net_ui_*): one request at a time, served by the net task.
+typedef enum { UI_REQ_NONE, UI_REQ_SCAN, UI_REQ_JOIN } ui_req_t;
+static ui_req_t s_ui_req;  // s_lock, as the other s_ui_* (but s_ui_net once the task has it)
+static net_ui_state_t s_ui_state;
+EXT_RAM_BSS_ATTR static net_ap_t s_ui_aps[NET_UI_MAX_APS];  // internal RAM is short with Wi-Fi on
+static int s_ui_naps;
+static net_join_t s_ui_result;
+static net_sambot_t s_ui_sambot;
+static wifi_net_t s_ui_net;  // the network to try; wiped once taken
 
 // ---------- small helpers ----------
 
@@ -286,9 +301,13 @@ static void load_token(void)
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = data;
+        s_disc_reason = d ? d->reason : 0;
         s_wifi_up = false;
         xEventGroupClearBits(s_ev, EV_GOT_IP);
         xEventGroupSetBits(s_ev, EV_DISCONN);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_assoc = true;
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         s_wifi_up = true;
         xEventGroupSetBits(s_ev, EV_GOT_IP);
@@ -306,6 +325,7 @@ static esp_err_t wifi_on(void)
         s_netif = esp_netif_create_default_wifi_sta();
         ESP_RETURN_ON_FALSE(s_netif, ESP_ERR_NO_MEM, TAG, "sta netif");
         esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, on_wifi, NULL);
+        esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, on_wifi, NULL);
         esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL);
     }
     if (!s_wifi_init) {
@@ -360,6 +380,8 @@ static bool try_connect(const wifi_net_t *n, const uint8_t *bssid, uint8_t chann
     }
     esp_wifi_disconnect();
     xEventGroupClearBits(s_ev, EV_GOT_IP | EV_DISCONN);
+    s_disc_reason = 0;
+    s_assoc = false;
     if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK || esp_wifi_connect() != ESP_OK) {
         memset(&wc, 0, sizeof wc);
         return false;
@@ -367,6 +389,8 @@ static bool try_connect(const wifi_net_t *n, const uint8_t *bssid, uint8_t chann
     memset(&wc, 0, sizeof wc);
     EventBits_t b = xEventGroupWaitBits(s_ev, EV_GOT_IP | EV_DISCONN, pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
     if (!(b & EV_GOT_IP)) {
+        s_fail_reason = (b & EV_DISCONN) ? s_disc_reason : 0;  // 0: timed out
+        s_fail_assoc = s_assoc;
         esp_wifi_disconnect();
         return false;
     }
@@ -450,6 +474,190 @@ out:
     unlock();
     mem_log(ok ? "joined" : "no network");
     return ok;
+}
+
+// ---------- on-coin setup ----------
+
+static void ui_set(net_ui_state_t st)
+{
+    lock();
+    s_ui_state = st;
+    unlock();
+}
+
+static void ui_done(net_join_t result, net_sambot_t sambot)
+{
+    lock();
+    s_ui_result = result;
+    s_ui_sambot = sambot;
+    s_ui_state = NET_UI_DONE;
+    unlock();
+}
+
+static net_join_t join_failure(uint8_t reason, bool assoc)
+{
+    switch (reason) {
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_MIC_FAILURE:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_802_1X_AUTH_FAILED:
+        return NET_JOIN_WRONG_PASSWORD;  // or a signal too weak to finish the handshake
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+        return NET_JOIN_NOT_FOUND;
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        return NET_JOIN_UNSUPPORTED;
+    case 0:
+        return assoc ? NET_JOIN_NO_IP : NET_JOIN_FAILED;  // timed out
+    default:
+        return NET_JOIN_FAILED;
+    }
+}
+
+static void ui_scan(void)
+{
+    if (!power_ok()) {
+        ui_done(NET_JOIN_LOW_BATTERY, NET_SAMBOT_OK);
+        return;
+    }
+    s_tried = true;
+    wifi_ap_record_t *aps = heap_caps_calloc(24, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM);
+    uint16_t found = 24;
+    wifi_scan_config_t sc = {.scan_type = WIFI_SCAN_TYPE_ACTIVE};  // default times: required with BLE on
+    int64_t t0 = now_us();
+    if (!aps || wifi_on() != ESP_OK || esp_wifi_scan_start(&sc, true) != ESP_OK ||
+        esp_wifi_scan_get_ap_records(&found, aps) != ESP_OK) {
+        free(aps);
+        ui_done(NET_JOIN_RADIO, NET_SAMBOT_OK);
+        return;
+    }
+    // One entry per SSID (its strongest access point), hidden ones left out, strongest first.
+    net_ap_t list[NET_UI_MAX_APS];
+    int n = 0;
+    lock();
+    for (int a = 0; a < found; a++) {
+        const char *ssid = (const char *)aps[a].ssid;
+        if (!ssid[0]) {
+            continue;
+        }
+        int i = 0;
+        while (i < n && strcmp(list[i].ssid, ssid) != 0) {
+            i++;
+        }
+        if (i < n) {
+            if (aps[a].rssi > list[i].rssi) {
+                list[i].rssi = aps[a].rssi;
+            }
+            continue;
+        }
+        if (n == NET_UI_MAX_APS) {
+            continue;
+        }
+        net_ap_t *e = &list[n++];
+        memset(e, 0, sizeof *e);
+        snprintf(e->ssid, sizeof e->ssid, "%s", ssid);
+        e->rssi = aps[a].rssi;
+        e->secure = aps[a].authmode != WIFI_AUTH_OPEN && aps[a].authmode != WIFI_AUTH_OWE;
+        for (int k = 0; k < s_nnets; k++) {
+            e->saved |= strcmp(s_nets[k].ssid, ssid) == 0;
+        }
+    }
+    for (int i = 1; i < n; i++) {
+        for (int j = i; j > 0 && list[j].rssi > list[j - 1].rssi; j--) {
+            net_ap_t t = list[j];
+            list[j] = list[j - 1];
+            list[j - 1] = t;
+        }
+    }
+    memcpy(s_ui_aps, list, n * sizeof list[0]);
+    s_ui_naps = n;
+    s_ui_state = NET_UI_SCANNED;
+    unlock();
+    ESP_LOGI(TAG, "setup scan: %u access points, %d networks in %lld ms", found, n, (now_us() - t0) / 1000);
+    free(aps);
+    s_linger_until_us = now_us() + LINGER_MS * 1000LL;
+}
+
+static void ui_join(void)
+{
+    wifi_net_t *n = heap_caps_calloc(1, sizeof *n, MALLOC_CAP_SPIRAM);
+    lock();
+    if (n) {
+        *n = s_ui_net;
+    }
+    memset(&s_ui_net, 0, sizeof s_ui_net);
+    unlock();
+    if (!n) {
+        ui_done(NET_JOIN_FAILED, NET_SAMBOT_OK);
+        return;
+    }
+    if (!power_ok()) {
+        ui_done(NET_JOIN_LOW_BATTERY, NET_SAMBOT_OK);
+        goto out;
+    }
+    s_tried = true;
+    if (wifi_on() != ESP_OK) {
+        ui_done(NET_JOIN_RADIO, NET_SAMBOT_OK);
+        goto out;
+    }
+    if (s_wifi_up) {
+        // On a network already (maybe this one): leave it first, so that its disconnect is not
+        // taken for this attempt's failure.
+        xEventGroupClearBits(s_ev, EV_DISCONN);
+        esp_wifi_disconnect();
+        xEventGroupWaitBits(s_ev, EV_DISCONN, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
+    }
+    int64_t t0 = now_us();
+    bool ok = try_connect(n, NULL, 0, UI_JOIN_MS);
+    uint8_t reason = ok ? 0 : s_fail_reason;
+    bool assoc = !ok && s_fail_assoc;
+    ESP_LOGI(TAG, "setup join \"%s\": %s after %lld ms (reason %u%s)", n->ssid, ok ? "ok" : "failed",
+             (now_us() - t0) / 1000, reason, assoc ? ", associated" : "");
+    lock();
+    s_st.wifi_up = ok;
+    unlock();
+    s_linger_until_us = now_us() + LINGER_MS * 1000LL;
+    if (!ok) {
+        esp_wifi_disconnect();
+        ui_done(join_failure(reason, assoc), NET_SAMBOT_OK);
+        goto out;
+    }
+    net_wifi_add(n->ssid, n->pass);  // the newest: tried first from now on
+    net_sambot_t sb = NET_SAMBOT_NO_KEY;
+    if (s_has_token) {
+        ui_set(NET_UI_CHECKING);
+        sambot_begin();
+        sambot_err_t err;
+        sambot_rc_t rc = sambot_check(&err);
+        ESP_LOGI(TAG, "setup: SamBot %s (status %d)", sambot_rc_name(rc), err.status);
+        sb = rc == SAMBOT_OK ? NET_SAMBOT_OK : rc == SAMBOT_AUTH ? NET_SAMBOT_KEY_REFUSED : NET_SAMBOT_UNREACHED;
+        if (rc == SAMBOT_OK) {
+            s_auth_failed = false;
+        }
+    }
+    ui_done(NET_JOIN_OK, sb);
+out:
+    memset(n, 0, sizeof *n);
+    free(n);
+}
+
+// A setup request, if any (net task, holding s_radio).
+static void ui_step(void)
+{
+    lock();
+    ui_req_t req = s_ui_req;
+    s_ui_req = UI_REQ_NONE;
+    unlock();
+    if (s_stop) {
+        return;
+    }
+    if (req == UI_REQ_SCAN) {
+        ui_scan();
+    } else if (req == UI_REQ_JOIN) {
+        ui_join();
+    }
 }
 
 // ---------- one clip ----------
@@ -676,6 +884,7 @@ static void net_task(void *arg)
         xEventGroupWaitBits(s_ev, EV_KICK, pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
         xSemaphoreTake(s_radio, portMAX_DELAY);
         bool was_on = s_wifi_init;
+        ui_step();
         net_step();
         if (!s_wifi_init && (was_on || s_tried)) {
             mem_log("Wi-Fi off");
@@ -905,6 +1114,100 @@ void net_shutdown(void)
         s_rtc_shutdown_ms = SHUTDOWN_BUSY;
         ESP_LOGW(TAG, "shutdown: Wi-Fi still busy after 2 s");
     }
+}
+
+void net_ui_scan(void)
+{
+    if (!s_lock) {
+        return;
+    }
+    lock();
+    s_ui_req = UI_REQ_SCAN;
+    s_ui_state = NET_UI_SCANNING;
+    unlock();
+    xEventGroupSetBits(s_ev, EV_KICK);
+}
+
+void net_ui_join(const char *ssid, const char *pass)
+{
+    if (!s_lock) {
+        return;
+    }
+    lock();
+    memset(&s_ui_net, 0, sizeof s_ui_net);
+    snprintf(s_ui_net.ssid, sizeof s_ui_net.ssid, "%s", ssid ? ssid : "");
+    for (int i = 0; !pass && i < s_nnets; i++) {
+        if (strcmp(s_nets[i].ssid, s_ui_net.ssid) == 0) {
+            pass = s_nets[i].pass;  // a saved network: its password
+        }
+    }
+    snprintf(s_ui_net.pass, sizeof s_ui_net.pass, "%s", pass ? pass : "");
+    s_ui_req = UI_REQ_JOIN;
+    s_ui_state = NET_UI_JOINING;
+    unlock();
+    xEventGroupSetBits(s_ev, EV_KICK);
+}
+
+net_ui_state_t net_ui_state(void)
+{
+    if (!s_lock) {
+        return NET_UI_IDLE;
+    }
+    lock();
+    net_ui_state_t st = s_ui_state;
+    unlock();
+    return st;
+}
+
+int net_ui_aps(net_ap_t *out, int max)
+{
+    if (!s_lock) {
+        return 0;
+    }
+    lock();
+    int n = s_ui_naps < max ? s_ui_naps : max;
+    memcpy(out, s_ui_aps, n * sizeof *out);
+    unlock();
+    return n;
+}
+
+net_join_t net_ui_result(net_sambot_t *sambot)
+{
+    if (!s_lock) {
+        return NET_JOIN_FAILED;
+    }
+    lock();
+    net_join_t r = s_ui_result;
+    if (sambot) {
+        *sambot = s_ui_sambot;
+    }
+    unlock();
+    return r;
+}
+
+bool net_ui_busy(void)
+{
+    net_ui_state_t st = net_ui_state();
+    return st == NET_UI_SCANNING || st == NET_UI_JOINING || st == NET_UI_CHECKING;
+}
+
+int net_saved(char ssids[][33], int max, int *current)
+{
+    *current = -1;
+    if (!s_lock) {
+        return 0;
+    }
+    lock();
+    int n = s_nnets < max ? s_nnets : max;
+    for (int i = 0; i < n; i++) {
+        memcpy(ssids[i], s_nets[i].ssid, 33);
+        ssids[i][32] = 0;
+        if (s_wifi_up && strcmp(s_nets[i].ssid, s_last.ssid) == 0) {
+            *current = i;
+        }
+    }
+    unlock();
+    return n;
 }
 
 esp_err_t net_wifi_add(const char *ssid, const char *pass)

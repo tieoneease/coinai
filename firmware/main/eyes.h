@@ -32,7 +32,7 @@ typedef enum {
     EXPR_CLOSED, EXPR_DOT, EXPR_COUNT,
 } expr_t;
 
-typedef enum { LAYOUT_FULL, LAYOUT_LISTEN, LAYOUT_HEADER, LAYOUT_FOOTER } layout_t;
+typedef enum { LAYOUT_FULL, LAYOUT_LISTEN, LAYOUT_HEADER, LAYOUT_FOOTER, LAYOUT_PEEK } layout_t;  // PEEK: small, at the top (above a keyboard)
 
 typedef enum { RIM_OFF, RIM_PROGRESS, RIM_ORBIT } rim_mode_t;
 

@@ -114,5 +114,6 @@ With a known network (`WIFI_SET`) and a SamBot token stored, the coin can send c
 
 - **`delivery` (`CFG_SET` key `0x06`):** 0 = Wi-Fi first: a new recording is the coin's from its first byte, and goes to the phone only if no known network answers or SamBot is not reached. 1 = phone first: Wi-Fi only when no phone is connected when the clip ends. 2 = phone only. Clips left from earlier go over Wi-Fi in the background in modes 0 and 1.
 - **Left to the phone:** clips below the voiced threshold (the app keeps them as "no speech"), clips the phone received in full but has not `ACK`ed yet, and everything while the battery is below 3.6 V off USB power.
+- **Networks** also come from the coin's own Settings > Wi-Fi screen (PLAN.md D18); `WIFI_SET` and the screen share the same list of 4.
 - **The token** is set over the USB console (`net token`), never sent back. It is an exe.dev API token scoped to the SamBot VM.
 - **Firmware status:** built; the network calls have not yet run against a real network.

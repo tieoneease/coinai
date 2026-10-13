@@ -56,6 +56,54 @@ esp_err_t net_wifi_add(const char *ssid, const char *pass);  // pass "" = open n
 esp_err_t net_wifi_forget(const char *ssid);                 // NULL: all
 esp_err_t net_set_token(const char *token);                  // NULL or "": clear
 esp_err_t net_set_url(const char *url);
+// On-coin setup (ui.c, Settings > Wi-Fi): look for networks, then try one. Both run in the net task,
+// after a delivery in progress; poll net_ui_state(). A network is saved (as the newest) only when it
+// joined.
+typedef enum {
+    NET_UI_IDLE,
+    NET_UI_SCANNING,
+    NET_UI_SCANNED,   // net_ui_aps()
+    NET_UI_JOINING,
+    NET_UI_CHECKING,  // joined: asking SamBot
+    NET_UI_DONE,      // net_ui_result()
+} net_ui_state_t;
+
+typedef enum {
+    NET_JOIN_OK,
+    NET_JOIN_WRONG_PASSWORD,
+    NET_JOIN_NOT_FOUND,
+    NET_JOIN_UNSUPPORTED,  // its security (WEP, WPA-TKIP only, enterprise)
+    NET_JOIN_NO_IP,        // associated, no address from DHCP
+    NET_JOIN_FAILED,
+    NET_JOIN_LOW_BATTERY,  // on battery below 3.6 V: no Wi-Fi (as for delivery)
+    NET_JOIN_RADIO,        // Wi-Fi did not start, or the scan failed
+} net_join_t;
+
+typedef enum {
+    NET_SAMBOT_OK,
+    NET_SAMBOT_NO_KEY,     // no token stored
+    NET_SAMBOT_KEY_REFUSED,
+    NET_SAMBOT_UNREACHED,
+} net_sambot_t;
+
+#define NET_UI_MAX_APS 12
+
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    bool secure;
+    bool saved;
+} net_ap_t;
+
+void net_ui_scan(void);
+void net_ui_join(const char *ssid, const char *pass);  // pass "": open, NULL: the saved one; copied, wiped after
+net_ui_state_t net_ui_state(void);
+int net_ui_aps(net_ap_t *out, int max);  // the last scan: one per SSID, strongest first
+net_join_t net_ui_result(net_sambot_t *sambot);
+bool net_ui_busy(void);                  // scanning or joining: keep the screen awake
+// The saved networks, newest first; *current: the one Wi-Fi is on now (-1 none).
+int net_saved(char ssids[][33], int max, int *current);
+
 void net_print(void);       // console `net`
 void net_scan_print(void);  // console `wifi scan`
 esp_err_t net_console_register(void);  // `wifi` and `net` on the USB console

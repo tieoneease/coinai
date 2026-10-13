@@ -28,6 +28,8 @@ const char *sambot_rc_name(sambot_rc_t rc);
 void sambot_configure(const char *base_url, const char *token);
 // Starts one delivery: clears an earlier abort. An abort during the delivery holds until the next.
 void sambot_begin(void);
+// GET /health through the proxy: SamBot is reachable and takes the token (OK, AUTH, NET).
+sambot_rc_t sambot_check(sambot_err_t *err);
 // Makes the call in progress (and any later one until sambot_begin) return SAMBOT_ABORTED within
 // about a second, or once a blocking connect gives up.
 void sambot_abort(void);
