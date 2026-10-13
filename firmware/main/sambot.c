@@ -8,6 +8,8 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "sambot";
 
@@ -18,14 +20,13 @@ static const char *TAG = "sambot";
 #define TRANSCRIBE_MS   45000      // per network wait while SamBot transcribes
 #define SSE_MAX         (512 * 1024)  // a bigger frame is skipped
 #define TRANSCRIBE_BODY_MAX (256 * 1024)  // the JSON with the transcript: hours of speech
-// History replayed before host_stream_live. Without `tail` SamBot replays the lane's whole
-// transcript (119 MB in 2026-10). `tail=0` would mean live-only but SamBot reads it as everything
-// (`slice(-0)`), so one event it is; anything before host_stream_live is discarded anyway.
-#define REPLAY_TAIL     "1"
+#define POLL_MS         2500       // after the prompt: how often the coin looks whether the turn is over
+#define WINDOW_MAX      400        // durable events read back for one turn, at most
 
 static char s_base[128] = "https://sambot.exe.xyz";
 static char s_auth[600];
 static volatile bool s_abort;
+static size_t s_rx;  // event-stream bytes read during the current sambot_ask
 
 const char *sambot_rc_name(sambot_rc_t rc)
 {
@@ -421,7 +422,10 @@ static size_t sse_feed(sse_t *s, const char *buf, size_t n, bool (*on_frame)(con
 }
 
 typedef struct {
-    bool live;
+    bool live;      // host_stream_live reached
+    bool busy;      // its `busy`: the lane is in a turn
+    long total;     // its `historyTotal`: durable events in the lane's transcript (-1: unknown)
+    bool collect;   // gather the replayed window's assistant text and agent_settled
     bool settled;
     char *reply;
     size_t reply_len, reply_used;
@@ -429,21 +433,8 @@ typedef struct {
 
 static const char *type_of(const cJSON *j)
 {
-    const cJSON *t = cJSON_GetObjectItemCaseSensitive(j, "type");
+    const cJSON *t = j ? cJSON_GetObjectItemCaseSensitive(j, "type") : NULL;
     return cJSON_IsString(t) ? t->valuestring : "";
-}
-
-static bool frame_until_live(const char *data, void *ctx)
-{
-    ask_state_t *st = ctx;
-    // Replayed frames can be big: only the one that may be the boundary is parsed.
-    if (!strstr(data, "host_stream_live")) {
-        return true;
-    }
-    cJSON *j = cJSON_Parse(data);
-    st->live = j && strcmp(type_of(j), "host_stream_live") == 0;
-    cJSON_Delete(j);
-    return !st->live;  // stop at the boundary: later frames in the same chunk belong to the turn
 }
 
 static void append(ask_state_t *st, const char *s)
@@ -487,21 +478,41 @@ static void assistant_text(const cJSON *event, ask_state_t *st)
     }
 }
 
-static bool frame_turn(const char *data, void *ctx)
+// A replayed frame, up to host_stream_live. SamBot writes `{"type":"..."` first, so the type is
+// read without parsing; only host_stream_live and (when collecting) message_end are parsed.
+static bool frame_window(const char *data, void *ctx)
 {
     ask_state_t *st = ctx;
-    cJSON *j = cJSON_Parse(data);
-    if (!j) {
-        return true;
+    static const char PRE[] = "{\"type\":\"";
+    char type[32] = "";
+    cJSON *j = NULL;
+    if (strncmp(data, PRE, sizeof PRE - 1) == 0) {
+        const char *t = data + sizeof PRE - 1, *q = strchr(t, '"');
+        if (q && (size_t)(q - t) < sizeof type) {
+            memcpy(type, t, q - t);
+            type[q - t] = 0;
+        }
+    } else {  // laid out some other way: parse to find out
+        j = cJSON_Parse(data);
+        snprintf(type, sizeof type, "%s", type_of(j));
     }
-    const char *type = type_of(j);
-    if (strcmp(type, "agent_settled") == 0) {
-        st->settled = true;
-    } else if (strcmp(type, "message_end") == 0 || strcmp(type, "message") == 0) {
+    bool live = strcmp(type, "host_stream_live") == 0;
+    bool text = st->collect && (strcmp(type, "message_end") == 0 || strcmp(type, "message") == 0);
+    if ((live || text) && !j) {
+        j = cJSON_Parse(data);
+    }
+    if (live && j) {
+        const cJSON *total = cJSON_GetObjectItemCaseSensitive(j, "historyTotal");
+        st->busy = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j, "busy"));
+        st->total = cJSON_IsNumber(total) ? (long)total->valuedouble : -1;
+        st->live = true;
+    } else if (text && j) {
         assistant_text(j, st);
+    } else if (st->collect && strcmp(type, "agent_settled") == 0) {
+        st->settled = true;
     }
     cJSON_Delete(j);
-    return !st->settled;
+    return !st->live;  // stop at the boundary: what follows is live
 }
 
 typedef struct {
@@ -532,6 +543,9 @@ static int pump(esp_http_client_handle_t h, sse_t *sse, pump_t *p, int64_t deadl
             return -2;
         }
         int n = esp_http_client_read(h, p->buf, 1024);
+        if (n > 0) {
+            s_rx += (size_t)n;
+        }
         if (n == -ESP_ERR_HTTP_EAGAIN) {
             continue;
         }
@@ -614,17 +628,17 @@ out:
     return rc;
 }
 
-sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, char *reply, size_t reply_len,
-                       bool *settled, const sambot_ask_hooks_t *hooks, sambot_err_t *err)
+// One look at a lane: GET /events?lane=&tail=N, the replayed window up to host_stream_live, then
+// the connection is closed. Fills st->busy and st->total; with st->collect also the window's
+// assistant text (appended to st->reply) and whether it holds agent_settled.
+static sambot_rc_t read_window(const char *lane, long tail, ask_state_t *st, sambot_err_t *err)
 {
-    reply[0] = 0;
-    *settled = false;
-    set_err(err, 0, "", NULL);
-    ask_state_t st = {.reply = reply, .reply_len = reply_len};
+    st->live = st->busy = st->settled = false;
+    st->total = -1;
+    char path[96];
+    snprintf(path, sizeof path, "/events?lane=%s&tail=%ld", lane, tail);
     sse_t sse = {0};
     pump_t pb = {.buf = ps_malloc(1024)};
-    char path[96];
-    snprintf(path, sizeof path, "/events?lane=%s&tail=" REPLAY_TAIL, lane);
     esp_http_client_handle_t h = client(path, HTTP_METHOD_GET, 15000);
     sambot_rc_t rc = SAMBOT_NET;
     if (!pb.buf || !h) {
@@ -662,31 +676,12 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
         goto out;
     }
     esp_http_client_set_timeout_ms(h, READ_SLICE_MS);  // from here on: short reads, to watch deadlines
-    // 1. Everything up to host_stream_live is replay.
-    int r = pump(h, &sse, &pb, esp_timer_get_time() + LIVE_WAIT_MS * 1000LL, frame_until_live, &st);
-    if (r != 1) {
+    int r = pump(h, &sse, &pb, esp_timer_get_time() + LIVE_WAIT_MS * 1000LL, frame_window, st);
+    if (r == 1 && st->total >= 0) {
+        rc = SAMBOT_OK;
+    } else {
         rc = r == -2 ? SAMBOT_ABORTED : SAMBOT_NET;
         set_err(err, 0, r == 0 ? "events: not live in time" : "events: stream ended", NULL);
-        goto out;
-    }
-    // 2. Only then the prompt.
-    if (s_abort || (hooks && hooks->before_prompt && !hooks->before_prompt(hooks->ctx))) {
-        set_err(err, 0, "aborted before the prompt", NULL);
-        rc = SAMBOT_ABORTED;
-        goto out;
-    }
-    rc = post_prompt(text, lane, err);
-    if (rc != SAMBOT_OK) {
-        goto out;
-    }
-    if (hooks && hooks->prompted) {
-        hooks->prompted(hooks->ctx);
-    }
-    // 3. Assistant text until agent_settled (the stream stays open from before the prompt).
-    r = pump(h, &sse, &pb, esp_timer_get_time() + (int64_t)wait_ms * 1000, frame_turn, &st);
-    *settled = st.settled;
-    if (r < 0) {
-        ESP_LOGW(TAG, "event stream %s after the prompt", r == -2 ? "aborted" : "ended");
     }
 out:
     if (h) {
@@ -695,4 +690,72 @@ out:
     sse_free(&sse);
     free(pb.buf);
     return rc;
+}
+
+sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, char *reply, size_t reply_len,
+                       bool *settled, const sambot_ask_hooks_t *hooks, sambot_err_t *err)
+{
+    reply[0] = 0;
+    *settled = false;
+    set_err(err, 0, "", NULL);
+    ask_state_t st = {.reply = reply, .reply_len = reply_len};
+    s_rx = 0;
+    // 1. Where the lane's transcript ends now: the turn is whatever comes after. (tail=1: SamBot
+    // reads tail=0 as the whole transcript.)
+    sambot_rc_t rc = read_window(lane, 1, &st, err);
+    if (rc != SAMBOT_OK) {
+        return rc;
+    }
+    long base = st.total;
+    // 2. The prompt.
+    if (s_abort || (hooks && hooks->before_prompt && !hooks->before_prompt(hooks->ctx))) {
+        set_err(err, 0, "aborted before the prompt", NULL);
+        return SAMBOT_ABORTED;
+    }
+    rc = post_prompt(text, lane, err);
+    if (rc != SAMBOT_OK) {
+        return rc;
+    }
+    if (hooks && hooks->prompted) {
+        hooks->prompted(hooks->ctx);
+    }
+    // 3. Not the live stream: it carries every token delta, each with the whole message so far,
+    // megabytes for an answer with thinking. While the lane is busy only its newest durable event is
+    // read; once it is idle, the turn's durable events are read back (final messages only).
+    int64_t deadline = esp_timer_get_time() + (int64_t)wait_ms * 1000;
+    int looks = 0;
+    for (bool last = false; !last && !s_abort;) {
+        int64_t wake = esp_timer_get_time() + POLL_MS * 1000LL;
+        if (wake >= deadline) {
+            wake = deadline;
+            last = true;  // time is up: whatever the turn has said so far
+        }
+        while (esp_timer_get_time() < wake && !s_abort) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        sambot_err_t e2;
+        st.collect = false;
+        looks++;
+        if (read_window(lane, 1, &st, &e2) != SAMBOT_OK) {
+            continue;  // a failed look: the next one may work
+        }
+        if (st.total < base) {
+            base = 0;  // a new session (its own transcript) since the prompt
+        }
+        if (st.total <= base || (st.busy && !last)) {
+            continue;
+        }
+        long n = st.total - base;
+        st.collect = true;
+        st.reply_used = 0;
+        reply[0] = 0;
+        looks++;
+        if (read_window(lane, n < WINDOW_MAX ? n : WINDOW_MAX, &st, &e2) == SAMBOT_OK && st.settled) {
+            *settled = true;
+            break;
+        }
+    }
+    ESP_LOGI(TAG, "turn %s after %d looks, %u bytes read", *settled ? "settled" : "not settled", looks,
+             (unsigned)s_rx);
+    return SAMBOT_OK;  // the prompt went out
 }
