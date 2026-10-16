@@ -70,7 +70,7 @@ Standby falls through to Off after a configurable number of unused hours, or on 
   - From Standby or Off, if PWR is still held once firmware is ready, recording runs until release.
 - **BOOT** is an in-app secondary button (cancel, back). It is not a wake source: PWR already covers waking, and this avoids strapping-pin edge cases.
   - Holding BOOT while powering on from Off is expected to enter ROM download mode, which would be a recovery path (**verify**). esptool's USB reset already reaches download mode without it.
-- **Power off:** from the UI menu, or by holding BOOT and then PWR for 3 s. The PMIC's hardware long-press shutdown is disabled so that long dictation can't cut power. Task, interrupt and RTC watchdogs cover hangs.
+- **Power off:** from the UI menu, or by holding BOOT and then PWR for 3 s. The PMIC's hardware long-press shutdown is disabled so that long dictation can't cut power. Task, interrupt and RTC watchdogs cover hangs, and so does a UI heartbeat: if the UI stops ticking for 6 s outside a recording, the coin saves a core dump and restarts (D20).
 - **Touch** is for UI navigation only.
 
 ### Recording
@@ -92,6 +92,7 @@ Store and forward over BLE, as specified in [PROTOCOL.md](PROTOCOL.md):
 - Transfer begins as soon as the phone connects, including mid-recording.
 - It resumes by byte offset after a disconnect.
 - The device deletes its copy only after the app acknowledges a CRC-matched copy.
+- After a clip the coin waits 10 s for the phone to connect, then up to 60 s for a connected phone to take the clips (D19).
 
 ## Android app
 
@@ -332,6 +333,12 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - **D18 (2026-10-13) Wi-Fi networks can be added on the coin itself:** Settings > Wi-Fi scans, lists the networks in range, and takes a password on an on-screen keyboard (`kbd.c`). A network is saved only once it joins; the coin then asks SamBot's `/health` whether the token works. The app's `WIFI_SET` stays.
   - *Why:* without it the coin depends on the phone app or a USB console to get online, which defeats Wi-Fi as the fallback for a missing phone.
   - *Rejected:* a SoftAP with a captive page (an access point and a web server need internal RAM the coin does not have with BLE and the display running), WPS (phone hotspots rarely offer it), a QR code (no camera), LVGL's `lv_keyboard` (its button matrix drops a press that slides to another key and has no magnified preview).
+- **D19 (2026-10-16) The coin waits 10 s for a phone that has not connected, not 60 s.** A connected phone still gets 60 s to take the clips.
+  - *Why:* the coin's battery log showed every wake held awake for exactly 60 s, screen on, for a phone that had never paired: 90 wakes, 72 minutes awake, the battery from 48% to 7% and then the low-battery cut. Pending clips that no phone collects made every wake pay the full window.
+  - *Cost:* a phone that needs more than 10 s to reconnect gets the clips on the next wake, unless the coin is awake anyway (10 s linger after a recording from Standby, the idle timeout otherwise). Experiment 2 measures the real reconnect time.
+- **D20 (2026-10-16) One lock serializes everything sent to the panel, and a stalled UI restarts the coin.**
+  - *Why:* the screen froze for good while the coin kept recording. A core dump showed the LVGL task waiting forever in `spi_device_acquire_bus` inside a flush. ESP-IDF's SPI master is not thread-safe for one device used from several tasks: brightness changes from the control loop or the BLE worker raced LVGL's flushes, and the losing task was never woken. Reproduced with `bright 80 5000` during `ui bench` (froze within 5,000 writes); with the lock, 120,000 writes in 3 runs and no freeze.
+  - *How:* `display.c` takes one mutex around its own commands and around the panel's `draw_bitmap`, which it wraps, because LVGL's flushes go through it. The control loop restarts the coin through `esp_system_abort` (core dump to flash) when the UI tick is 6 s old and nothing is recording.
 - **D17 The device measures speech per clip (`voiced_ms` in `CLIP_ENDED`), and the app does not prompt SamBot below a threshold.** SamBot's transcriber turned a silent clip into "Thank you."
   - *Rejected:* app-side detection. It would need Opus decoding on the phone, or Whisper's `no_speech_prob`, which SamBot's `/voice/transcribe` does not return.
 
@@ -347,6 +354,7 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - SSE through the exe.dev proxy with token auth is untested. The web client already uses SSE through the proxy with cookie auth.
 - How long exe.dev VM tokens stay valid is unknown.
 - ColorOS may stop the app in ways that stock Android does not.
+- The battery log can't measure Standby drain yet. Its `rtc_s` jumps by up to about ±50 minutes across deep-sleep wakes, probably because each boot rescales the whole RTC count with a fresh slow-clock calibration.
 
 ## Open questions
 

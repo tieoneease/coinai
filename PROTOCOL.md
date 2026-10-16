@@ -10,6 +10,7 @@ This is the contract between `firmware/` (ESP32-S3, NimBLE peripheral) and `andr
   - every 20 ms for 30 s;
   - then every 152.5 ms until the delivery window closes;
   - then stop and go to Standby.
+- **Delivery window:** 10 s for the phone to connect; once it has, up to 60 s for it to take the clips. The coin stays awake longer only for its own reasons: the 10 s linger after a recording from Standby, the idle timeout, a reply. A phone that connects later gets the clips on the next wake. *Firmware status: the 10 s limit dates from 2026-10-16; before it, every wake with clips pending waited the full 60 s with the screen on (PLAN.md D19).*
 - **Pending clips** are retried on the next wake and on a periodic timer wake.
 - **Active with nothing pending:** every 1022.5 ms, so the app can reach settings and status.
 

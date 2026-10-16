@@ -41,8 +41,12 @@ static const char *TAG = "coinai";
 // Idle time before standby after a wake that recorded, once the phone has the clip and the
 // reply window is over.
 #define LINGER_S            10
-// How long the coin stays awake for the phone after a clip while clips are pending.
+// How long the coin stays awake for a connected phone after a clip while clips are pending.
 #define DELIVERY_S          60
+// How long it waits for a phone that has not connected yet. On 2026-10-16 every wake waited the
+// whole DELIVERY_S for a phone that was never paired: 90 wakes, 72 minutes awake, 48% -> 7%.
+#define PHONE_WAIT_S        10
+#define UI_STALL_S          6   // no UI tick for this long: abort and restart (see control_loop)
 // After a PWR tap, how long to wait for a phone that has not connected yet.
 #define TAP_DELIVERY_S      10
 #define POWEROFF_COMBO_MS   3000
@@ -297,8 +301,8 @@ static void log_wake_recording(const audio_clip_result_t *clip)
 // Owns standby and power-off decisions; runs on the main task after start-up.
 //
 // The coin stays awake while it records, while the phone is fetching clips or waiting for
-// SamBot's reply (ble_busy), while Wi-Fi delivers (net_busy), and for DELIVERY_S after a clip
-// while clips are pending. Otherwise:
+// SamBot's reply (ble_busy), while Wi-Fi delivers (net_busy), and after a clip while clips are
+// pending: PHONE_WAIT_S for the phone to connect, DELIVERY_S once it has. Otherwise:
 // standby after the idle time on battery, screen off on USB power.
 static void control_loop(lv_display_t *disp)
 {
@@ -307,7 +311,8 @@ static void control_loop(lv_display_t *disp)
     bool screen_off = false;
     bool standby_asap = false;        // PWR tap: standby as soon as the phone is served
     int64_t standby_req_us = 0;
-    int64_t deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
+    int64_t deliver_from_us = esp_timer_get_time();  // the delivery window opened
+    int64_t deliver_until_us = deliver_from_us + DELIVERY_S * 1000000LL;
     int last_reply_state = -1;
     uint16_t last_reply_clip = 0;
     uint16_t last_pending = 0;
@@ -315,13 +320,23 @@ static void control_loop(lv_display_t *disp)
     esp_task_wdt_add(NULL);  // standby and power-off decisions must not hang (D5)
     for (;;) {
         esp_task_wdt_reset();
+        // The coin has no reset button: a UI task that stops ticking (stuck in a flush, a lock)
+        // would leave a dark screen that no button wakes. Abort instead, which saves a core dump
+        // and reboots; not while recording, so the clip in progress closes normally first.
+        uint32_t beat = ui_heartbeat_ms();  // read before the clock, so the difference is never negative
+        int32_t stalled_ms = (int32_t)((uint32_t)(esp_timer_get_time() / 1000) - beat);
+        if (beat && stalled_ms > UI_STALL_S * 1000 && !audio_is_recording()) {
+            ESP_LOGE(TAG, "UI stalled for %" PRId32 " ms: core dump and restart", stalled_ms);
+            esp_system_abort("UI stalled");
+        }
         ctl_msg_t m;
         if (xQueueReceive(s_ctl, &m, pdMS_TO_TICKS(250)) == pdTRUE) {
             switch (m.type) {
             case CTL_CLIP:
                 s_last_activity_us = esp_timer_get_time();
                 if (m.clip.id && !m.clip.discarded) {
-                    deliver_until_us = esp_timer_get_time() + DELIVERY_S * 1000000LL;
+                    deliver_from_us = esp_timer_get_time();
+                    deliver_until_us = deliver_from_us + DELIVERY_S * 1000000LL;
                     ble_set_adv_mode(BLE_ADV_DELIVER);
                     net_kick(m.clip.id, false);
                 }
@@ -372,6 +387,7 @@ static void control_loop(lv_display_t *disp)
         }
         if (bs.pending > last_pending && !wake_clip_pending) {
             // More for the phone: a new clip, or one Wi-Fi gave back.
+            deliver_from_us = now;
             deliver_until_us = now + DELIVERY_S * 1000000LL;
             ble_set_adv_mode(BLE_ADV_DELIVER);
         }
@@ -393,7 +409,8 @@ static void control_loop(lv_display_t *disp)
                 screen_off = false;
             }
         }
-        bool delivering = bs.pending > 0 && now < deliver_until_us;
+        bool delivering = bs.pending > 0 && now < deliver_until_us &&
+                          (bs.connected || now - deliver_from_us < PHONE_WAIT_S * 1000000LL);
         if (standby_asap) {
             // After a tap only the transfer itself is waited for: no reply window, and at most
             // TAP_DELIVERY_S for a phone that has not connected yet.

@@ -264,6 +264,12 @@ void esp_restart(void)
     sim_exit_reset(ESP_RST_SW);
 }
 
+void esp_system_abort(const char *details)
+{
+    printf("abort() was called: %s\nRebooting...\n", details);
+    sim_exit_reset(ESP_RST_PANIC);
+}
+
 uint32_t esp_sleep_get_wakeup_causes(void)
 {
     return (uint32_t)sim_env_u64("COINSIM_WAKE", 0);

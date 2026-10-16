@@ -52,7 +52,8 @@ Console commands (type `help` on the console for the full list):
 | `poweroff` | PMIC off; PWR turns the board back on |
 | `ble inject <hex>`, `ble inject off` | feed a ctrl TLV to the protocol layer over USB; answers print as `BLE-CTRL`/`BLE-DATA` lines (`bletest.py --serial`) |
 | `battlog [clear]` | battery log as CSV (`rtc_s,event,vbat_mv,soc_pct,flags`); `python scripts/battlog.py COM9` reads it and estimates drain per state and battery life |
-| `fbdump`, `reboot`, `wdtest` | screen dump, restart, stall a task under the watchdog (expect a reboot, reset reason 6) |
+| `fbdump`, `reboot`, `wdtest` | screen dump, restart, stall a task under the watchdog (expect a reboot, reset reason 6). A panic, the watchdog, or a UI that stops ticking for 6 s saves a core dump: `scripts/idf firmware -p COM9 coredump-info` prints every task's backtrace |
+| `bright <1-100> [times]` | panel brightness (not saved); `bright 80 20000` during `ui bench 30` is the check for the panel race behind D20 |
 | `ui demo talk\|fail\|away\|nospeech\|discard\|pair\|power\|sleep\|lowbatt` | play a UI flow with synthetic inputs (`power` never powers off) |
 | `ui show face\|controls\|recent\|settings\|about\|bright\|wifi\|scan\|kbd`, `ui expr <name>`, `ui state` | jump to a screen, set the eyes' expression, print the UI mode |
 | `ui tap <x> <y>`, `ui swipe up\|down`, `ui type <text>`, `ui done` | drive the screens from the console as a touch would: a tap or swipe, typing into the open keyboard, its Done key (tests only: the console keeps the line) |

@@ -5,10 +5,13 @@
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_lcd_co5300.h"
+#include "esp_lcd_panel_interface.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "display";
 
@@ -21,6 +24,22 @@ static const char *TAG = "display";
 static esp_lcd_panel_io_handle_t s_io;
 static esp_lcd_panel_handle_t s_panel;
 static esp_lcd_touch_handle_t s_touch;
+
+// One task at a time on the panel. ESP-IDF's SPI master is not thread-safe for one device used from
+// several tasks: the bus lock keeps one bit per device, so a second task's acquire merges into the
+// first's and is never woken when the first releases. That froze the UI task in a flush for good
+// (2026-10-16 core dump) while the control loop set the brightness. Every panel operation goes
+// through this lock: the LVGL flush (draw_bitmap, wrapped below) and the commands sent here.
+static SemaphoreHandle_t s_io_lock;
+static esp_err_t (*s_draw_bitmap)(esp_lcd_panel_t *, int, int, int, int, const void *);
+
+static esp_err_t draw_bitmap_locked(esp_lcd_panel_t *panel, int x1, int y1, int x2, int y2, const void *data)
+{
+    xSemaphoreTake(s_io_lock, portMAX_DELAY);
+    esp_err_t err = s_draw_bitmap(panel, x1, y1, x2, y2, data);
+    xSemaphoreGive(s_io_lock);
+    return err;
+}
 
 // Waveshare BSP 3.0.0 lcd_init_cmds, unchanged.
 static const co5300_lcd_init_cmd_t s_init_cmds[] = {
@@ -52,14 +71,17 @@ static void rounder_cb(lv_event_t *e)
 
 static esp_err_t tx_param(uint8_t cmd, const void *param, size_t len)
 {
-    return esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (cmd << 8), param, len);  // QSPI write opcode
+    xSemaphoreTake(s_io_lock, portMAX_DELAY);
+    esp_err_t err = esp_lcd_panel_io_tx_param(s_io, (0x02 << 24) | (cmd << 8), param, len);  // QSPI write opcode
+    xSemaphoreGive(s_io_lock);
+    return err;
 }
 
 static int s_brightness;
 
 esp_err_t display_set_brightness(int percent)
 {
-    ESP_RETURN_ON_FALSE(s_io, ESP_ERR_INVALID_STATE, TAG, "not started");
+    ESP_RETURN_ON_FALSE(s_io_lock, ESP_ERR_INVALID_STATE, TAG, "not started");
     ESP_RETURN_ON_FALSE(percent >= 0 && percent <= 100, ESP_ERR_INVALID_ARG, TAG, "0-100");
     uint8_t v = (uint8_t)(percent * 255 / 100);
     s_brightness = percent;
@@ -97,6 +119,10 @@ lv_display_t *display_start(void)
     esp_lcd_panel_reset(s_panel);
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_disp_on_off(s_panel, true);
+    s_io_lock = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_io_lock ? ESP_OK : ESP_ERR_NO_MEM);
+    s_draw_bitmap = s_panel->draw_bitmap;  // LVGL's flushes take the lock too
+    s_panel->draw_bitmap = draw_bitmap_locked;
 
     esp_lv_adapter_config_t lv_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     lv_cfg.task_core_id = 1;        // core 0 has audio (and later the radio)

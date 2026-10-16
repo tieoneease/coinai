@@ -206,6 +206,7 @@ typedef enum {
 } esp_reset_reason_t;
 esp_reset_reason_t esp_reset_reason(void);
 void esp_restart(void) __attribute__((noreturn));
+void esp_system_abort(const char *details) __attribute__((noreturn));
 uint32_t esp_get_free_heap_size(void);
 
 // ---------- esp_random.h ----------

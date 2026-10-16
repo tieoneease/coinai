@@ -3063,10 +3063,17 @@ static void perf_reset(void)
 // ---------- the tick ----------
 
 static float s_bench_until;  // ui bench: redraw the whole screen every tick until then
+static volatile uint32_t s_beat_ms;  // see ui_heartbeat_ms()
+
+uint32_t ui_heartbeat_ms(void)
+{
+    return s_beat_ms;
+}
 
 static void tick_cb(lv_timer_t *t)
 {
     int64_t now = esp_timer_get_time();
+    s_beat_ms = (uint32_t)(now / 1000) | 1;  // never 0 once ticking
     float dt = s_last_us ? (now - s_last_us) / 1e6f : TICK_MS / 1000.0f;
     s_last_us = now;
     if (dt > 0.05f) {

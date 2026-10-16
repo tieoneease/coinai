@@ -9,6 +9,7 @@
 #include "ble.h"
 #include "bsp/esp-bsp.h"
 #include "clipstore.h"
+#include "display.h"
 #include "esp_attr.h"
 #include "esp_memory_utils.h"
 #include "esp_cpu_utils.h"
@@ -561,6 +562,28 @@ static int cmd_wdtest(int argc, char **argv)
     return 1;
 }
 
+// Panel commands from the console task while LVGL flushes from its own: the race that froze the
+// screen on 2026-10-16 (PLAN.md D20). `bright 80 20000` during `ui bench 30` is the regression check.
+static int cmd_bright(int argc, char **argv)
+{
+    int pct = argc > 1 ? atoi(argv[1]) : -1;
+    int n = argc > 2 ? atoi(argv[2]) : 1;
+    if (pct < 1 || pct > 100 || n < 1 || n > 100000) {
+        printf("usage: bright <1-100> [times]  (now %d)\n", display_get_brightness());
+        return 1;
+    }
+    int64_t t0 = esp_timer_get_time();
+    for (int i = 0; i < n; i++) {
+        display_set_brightness(i & 1 && pct > 1 ? pct - 1 : pct);
+        if ((i & 63) == 63) {
+            vTaskDelay(1);  // let the idle task feed the watchdog
+        }
+    }
+    display_set_brightness(pct);
+    printf("brightness %d, %d writes in %lld ms\n", pct, n, (esp_timer_get_time() - t0) / 1000);
+    return 0;
+}
+
 static int cmd_reboot(int argc, char **argv)
 {
     esp_restart();
@@ -599,6 +622,7 @@ esp_err_t diag_start(i2c_master_bus_handle_t bus)
         {.command = "poweroff", .help = "Switch the PMIC off", .func = cmd_poweroff},
         {.command = "ble", .help = "BLE status | ble bench [on|off] | ble forget | ble adv off|idle|deliver", .func = cmd_ble},
         {.command = "wdtest", .help = "Stall the console under the task watchdog (expect a reboot)", .func = cmd_wdtest},
+        {.command = "bright", .help = "bright <1-100> [times]: set the panel brightness (not saved)", .func = cmd_bright},
         {.command = "reboot", .help = "Restart the chip", .func = cmd_reboot},
         {.command = "ui", .help = "ui perf [reset] | ui demo <flow> | ui show <screen> | ui expr <name> | ui state", .func = ui_console},
     };
