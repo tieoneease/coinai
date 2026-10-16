@@ -186,6 +186,22 @@ static int cmd_stats(int argc, char **argv)
     return 0;
 }
 
+static void base64_line(const uint8_t *in, size_t len, char *out);
+
+// Prints one base64 line of a long dump. USB console writes rarely block, so a dump of
+// several hundred KB would hold the CPU past the 5 s task watchdog and reset the coin
+// near its end; one tick every 64 lines lets the idle task run.
+static void dump_line(const uint8_t *in, size_t len)
+{
+    static unsigned s_lines;
+    char line[80];
+    base64_line(in, len, line);
+    puts(line);
+    if ((++s_lines & 63) == 0) {
+        vTaskDelay(1);
+    }
+}
+
 static void base64_line(const uint8_t *in, size_t len, char *out)
 {
     static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -233,11 +249,8 @@ static int cmd_fbdump(int argc, char **argv)
     // Other tasks' log lines would land inside the base64 stream.
     esp_log_level_set("*", ESP_LOG_NONE);
     printf("FBDUMP-BEGIN %" PRIu32 " %" PRIu32 " %" PRIu32 " RGB565 render_us=%lld\n", w, h, stride, (long long)(t1 - t0));
-    char line[80];
     for (size_t off = 0; off < len; off += 57) {
-        size_t n = len - off < 57 ? len - off : 57;
-        base64_line(snap->data + off, n, line);
-        puts(line);
+        dump_line(snap->data + off, len - off < 57 ? len - off : 57);
     }
     printf("FBDUMP-END %08" PRIx32 "\n", esp_rom_crc32_le(0, snap->data, len));
     fflush(stdout);
@@ -309,14 +322,12 @@ static int cmd_clip(int argc, char **argv)
         esp_log_level_set("*", ESP_LOG_NONE);
         printf("CLIP-BEGIN %s\n", argv[2]);
         uint8_t chunk[57];
-        char line[80];
         uint32_t crc = 0, size = 0;
         size_t n;
         while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) {
             crc = esp_rom_crc32_le(crc, chunk, n);
             size += n;
-            base64_line(chunk, n, line);
-            puts(line);
+            dump_line(chunk, n);
         }
         fclose(f);
         printf("CLIP-END %08" PRIx32 " %" PRIu32 "\n", crc, size);
