@@ -26,6 +26,7 @@
 #include "misc/lv_area_private.h"         // lv_area_join
 #include "nvs.h"
 #include "power.h"
+#include "scene.h"
 #include "settings.h"
 
 static const char *TAG = "ui";
@@ -57,6 +58,7 @@ typedef enum {
     M_REPLY, M_FAIL, M_SENT, M_SAVED, M_NOSPEECH, M_DISCARDED, M_PAIRED, M_PAIRFAIL, M_CONTROLS, M_RECENT,
     M_DETAIL, M_BRIGHT, M_SETTINGS, M_PHONE, M_ABOUT, M_POWERCONF,
     M_WIFI, M_NETFORGET, M_SCAN, M_KBD, M_JOIN,  // Wi-Fi setup (BOOT goes back a step)
+    M_SCENE,  // a generated card (scene.c)
 } ui_mode_t;
 
 static const char *MODE_NAMES[] = {
@@ -64,6 +66,7 @@ static const char *MODE_NAMES[] = {
     "reply", "fail", "sent", "saved", "nospeech", "discarded", "paired", "pairfail", "controls", "recent",
     "detail", "bright", "settings", "phone", "about", "powerconf",
     "wifi", "netforget", "scan", "kbd", "join",
+    "scene",
 };
 
 static bool is_content(ui_mode_t m)
@@ -116,6 +119,7 @@ static bool s_drowsy_done;  // this idle period's drowsy flow has started
 enum {
     IT_STATUS, IT_CHIP, IT_CHIP_H, IT_TIMER, IT_HINT, IT_CAP, IT_BODY, IT_SUB, IT_PASS,
     IT_TILE0, IT_TILE1, IT_TILE2, IT_TILE3, IT_ROW0, IT_ROW1, IT_ROW2, IT_ROW3, IT_VALUE, IT_PILL,
+    IT_ROW4, IT_PILL2,
     IT_HEARD0, IT_LINE0 = IT_HEARD0 + HEARD_LINES, IT_COUNT = IT_LINE0 + BODY_LINES,
 };
 
@@ -316,42 +320,7 @@ static void place(lv_obj_t *o, int y_center)
 // is mapped, anything else dropped.
 static void ascii_text(char *dst, size_t n, const char *src)
 {
-    size_t o = 0;
-    const unsigned char *s = (const unsigned char *)src;
-    while (*s && o + 4 < n) {
-        if (*s < 0x80) {
-            dst[o++] = (char)(*s == '\n' || *s >= 0x20 ? *s : ' ');
-            s++;
-            continue;
-        }
-        uint32_t cp = 0;
-        int len = (*s >= 0xF0) ? 4 : (*s >= 0xE0) ? 3 : (*s >= 0xC0) ? 2 : 1;
-        cp = *s & (len == 4 ? 0x07 : len == 3 ? 0x0F : 0x1F);
-        int i = 1;
-        for (; i < len && s[i]; i++) {
-            cp = (cp << 6) | (s[i] & 0x3F);
-        }
-        s += i;  // never past the terminator of a cut-off sequence
-        if (i < len) {
-            break;
-        }
-        const char *rep = "";
-        switch (cp) {
-        case 0x2018: case 0x2019: case 0x2032: rep = "'"; break;
-        case 0x201C: case 0x201D: case 0x2033: rep = "\""; break;
-        case 0x2026: rep = "..."; break;
-        case 0x2013: case 0x2014: case 0x2212: rep = "-"; break;
-        case 0x00A0: case 0x202F: case 0x2009: rep = " "; break;
-        case 0x00B0: rep = " deg"; break;
-        case 0x00D7: rep = "x"; break;
-        case 0x2022: case 0x00B7: rep = "-"; break;
-        default: break;
-        }
-        for (const char *r = rep; *r && o + 1 < n; r++) {
-            dst[o++] = *r;
-        }
-    }
-    dst[o] = 0;
+    scene_ascii(dst, n, src);
 }
 
 // The largest font in which the text fits the box.
@@ -2661,9 +2630,281 @@ static float s_press_t;
 static bool s_pressed;
 static int s_drag_base;
 
+// ---------- scenes: generated cards (generative UI, experiment 1; parsed and laid out in scene.c) ----------
+
+static const int SCENE_ROWS[5] = {IT_ROW0, IT_ROW1, IT_ROW2, IT_ROW3, IT_ROW4};
+static int s_scene_page;            // steps: the step on screen
+static float s_timer_end;           // timer: s_now when it runs out (while running)
+static float s_timer_left;          // timer: seconds left (while paused)
+static bool s_timer_run, s_timer_done;
+
+static void style_check(lv_obj_t *row, bool checked)
+{
+    lv_obj_t *ring = lv_obj_get_child(row, 0), *l = lv_obj_get_child(row, 1);
+    lv_obj_set_style_border_color(ring, lv_color_hex(checked ? COL_AMBER : COL_DIM), 0);
+    lv_obj_set_style_bg_opa(ring, checked ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    if (l) {
+        lv_obj_set_style_text_color(l, lv_color_hex(checked ? COL_DIM : COL_TEXT), 0);
+    }
+}
+
+// A list row: a ring that fills when checked, and the item's one line.
+static lv_obj_t *build_check_row(int i)
+{
+    const scene_t *sc = scene_get();
+    lv_obj_t *r = box(s_scr);
+    lv_obj_set_width(r, 300);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 18, 0);
+    lv_obj_t *ring = box(r);
+    lv_obj_set_size(ring, 22, 22);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(ring, 2, 0);
+    lv_obj_set_style_bg_color(ring, lv_color_hex(COL_AMBER), 0);
+    for (int k = 0; k < sc->n_lines; k++) {
+        if (sc->lines[k].row == i) {
+            label(r, sc->lines[k].font, COL_TEXT, sc->lines[k].text);
+            break;
+        }
+    }
+    style_check(r, sc->checked[i]);
+    place(r, sc->row_y[i]);
+    return r;
+}
+
+static lv_obj_t *build_pill_x(const char *text, int x, int y, int w, bool primary)
+{
+    lv_obj_t *p = build_pill(text, y, primary);
+    lv_obj_set_width(p, w);
+    lv_obj_align(p, LV_ALIGN_CENTER, x - C, y - C);
+    return p;
+}
+
+static void timer_text(char *b, size_t n, float left)
+{
+    int t = (int)ceilf(left);
+    t = t < 0 ? 0 : t;
+    if (t >= 3600) {
+        snprintf(b, n, "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60);
+    } else {
+        snprintf(b, n, "%d:%02d", t / 60, t % 60);
+    }
+}
+
+// The card's text lines: those on every page and, for steps, the current step's.
+static void scene_lines(void)
+{
+    const scene_t *sc = scene_get();
+    int n = 0;
+    for (int k = 0; k < sc->n_lines && n < BODY_LINES; k++) {
+        const scene_line_t *l = &sc->lines[k];
+        if (l->row >= 0 || (l->page >= 0 && l->page != s_scene_page)) {
+            continue;
+        }
+        lv_obj_t *o = label(s_scr, l->font, l->dim ? COL_DIM : COL_TEXT, l->text);
+        place(o, l->y);
+        item_attach_later(IT_LINE0 + n, o, 14, n * 0.05f);
+        n++;
+    }
+    for (int j = n; j < BODY_LINES; j++) {
+        item_hide(IT_LINE0 + j, -10);
+    }
+}
+
+static void scene_footer(void)
+{
+    char b[16];
+    snprintf(b, sizeof b, "%d / %d", s_scene_page + 1, scene_get()->n_items);
+    lv_obj_t *f = item_get(IT_HINT);
+    if (f) {
+        set_text(f, b);
+    } else {
+        item_attach(IT_HINT, build_caption(b, 404, F20, COL_DIM), 14);
+    }
+}
+
+static float f_scene(int k)
+{
+    const scene_t *sc = scene_get();
+    if (k == 0) {
+        s_mode = M_SCENE;
+        s_scene_page = 0;
+        s_timer_done = false;
+        s_timer_run = sc->kind == CARD_TIMER && sc->seconds > 0;
+        s_timer_left = (float)sc->seconds;
+        s_timer_end = s_now + s_timer_left;
+        items_hide_except(0);
+        eyes_zzz(false);
+        eyes_set_level(0);
+        eyes_auto(true, false);
+        eyes_rim_track(sc->kind == CARD_LATER || sc->kind == CARD_TIMER);
+        if (sc->kind == CARD_LATER) {
+            eyes_rim(RIM_ORBIT, lv_color_hex(COL_AMBER));
+        } else if (sc->kind == CARD_TIMER) {
+            eyes_rim(RIM_PROGRESS, lv_color_hex(COL_AMBER));
+            eyes_rim_progress(1);
+        } else {
+            eyes_rim(RIM_OFF, lv_color_black());
+        }
+        eyes_layout(sc->eyes == EYES_PEEK ? LAYOUT_PEEK : LAYOUT_HEADER, M_LAYOUT);
+        eyes_set_expr((expr_t)sc->expr, M_POP);
+        eyes_look(0, 12, M_MOOD);
+        return 0.12f;
+    }
+    if (k == 1) {
+        scene_lines();
+        switch (sc->kind) {
+        case CARD_STAT: {
+            lv_obj_t *r = row_box(s_scr, 8);
+            label(r, sc->value_font, COL_AMBER, sc->value);
+            if (sc->unit[0]) {
+                label(r, F28, COL_DIM, sc->unit);
+            }
+            place(r, sc->value_y);
+            item_attach(IT_VALUE, r, 14);
+            break;
+        }
+        case CARD_LIST:
+            for (int i = 0; i < sc->n_items && i < 5; i++) {
+                item_attach_later(SCENE_ROWS[i], build_check_row(i), 14, 0.05f * (i + 1));
+            }
+            break;
+        case CARD_STEPS:
+            scene_footer();
+            break;
+        case CARD_TIMER: {
+            char b[16];
+            timer_text(b, sizeof b, s_timer_left);
+            item_attach(IT_VALUE, build_caption(b, sc->value_y, F48, COL_TEXT), 14);
+            item_attach(IT_HINT, build_caption("Tap to pause", 330, F20, COL_DIM), 14);
+            break;
+        }
+        case CARD_LATER:
+            // The card exists once the request went to SamBot; its answer comes in the app.
+            item_attach_later(IT_HINT, build_caption("SamBot is on it", sc->caption_y, F20, COL_DIM), 14, 0.25f);
+            break;
+        case CARD_CONFIRM:
+            item_attach_later(IT_PILL, build_pill_x(sc->no, C - 80, sc->pills_y, 144, false), 14, 0.15f);
+            item_attach_later(IT_PILL2, build_pill_x(sc->yes, C + 80, sc->pills_y, 144, true), 14, 0.2f);
+            break;
+        default:
+            break;
+        }
+        return sc->kind == CARD_TIMER ? 0.2f : 0.8f;
+    }
+    if (sc->kind != CARD_TIMER) {
+        eyes_blink(1, 1);
+        eyes_auto(true, true);
+        return FLOW_END;
+    }
+    // the timer ticks until it runs out (paused or not)
+    if (s_timer_done) {
+        return FLOW_END;
+    }
+    float left = s_timer_run ? s_timer_end - s_now : s_timer_left;
+    if (left <= 0) {
+        s_timer_run = false;
+        s_timer_done = true;
+        item_attach(IT_VALUE, build_caption("0:00", sc->value_y, F48, COL_AMBER), 0);
+        item_attach(IT_HINT, build_caption("Time's up", 330, F24, COL_TEXT), 14);
+        eyes_rim(RIM_OFF, lv_color_black());
+        eyes_set_expr(EXPR_SURPRISED, M_POP);
+        eyes_kick_y(-320);
+        printf("SCENE-ACTION timer done\n");
+        return FLOW_END;
+    }
+    lv_obj_t *v = item_get(IT_VALUE);
+    if (v) {
+        char b[16];
+        timer_text(b, sizeof b, left);
+        set_text(v, b);
+    }
+    if (s_timer_run) {
+        eyes_rim_progress(left / (float)sc->seconds);
+    }
+    return 0.2f;
+}
+
+static void scene_tap(int x, int y)
+{
+    scene_t *sc = scene_get();
+    switch (sc->kind) {
+    case CARD_LIST:
+        for (int i = 0; i < sc->n_items && i < 5; i++) {
+            lv_obj_t *r = item_get(SCENE_ROWS[i]);
+            if (r && abs(y - sc->row_y[i]) < 24) {
+                sc->checked[i] = !sc->checked[i];
+                style_check(r, sc->checked[i]);
+                int done = 0;
+                for (int j = 0; j < sc->n_items; j++) {
+                    done += sc->checked[j];
+                }
+                eyes_set_expr(done == sc->n_items ? EXPR_JOY : sc->checked[i] ? EXPR_HAPPY : (expr_t)sc->expr, M_POP);
+                printf("SCENE-ACTION list %d %s\n", i, sc->checked[i] ? "checked" : "unchecked");
+                return;
+            }
+        }
+        break;
+    case CARD_STEPS:
+        if (x >= C && s_scene_page + 1 >= sc->n_items) {
+            eyes_set_expr(EXPR_JOY, M_POP);
+            eyes_kick_y(-280);
+            printf("SCENE-ACTION steps done\n");
+        } else if (x >= C || s_scene_page > 0) {
+            s_scene_page += x >= C ? 1 : -1;
+            eyes_look(x >= C ? 18 : -18, 12, M_SACCADE);
+            scene_lines();
+            scene_footer();
+            printf("SCENE-ACTION steps page %d\n", s_scene_page + 1);
+        }
+        return;
+    case CARD_CONFIRM:
+        if (item_get(IT_PILL) && abs(y - sc->pills_y) < 30 && abs(x - C) < 160) {
+            bool yes = x >= C;
+            item_hide(IT_PILL, 0);
+            item_hide(IT_PILL2, 0);
+            item_attach(IT_CAP, build_caption(yes ? sc->yes : sc->no, sc->pills_y, F24, COL_AMBER), 14);
+            eyes_set_expr(yes ? EXPR_JOY : EXPR_CONTENT, M_POP);
+            printf("SCENE-ACTION confirm %s\n", yes ? "yes" : "no");
+            return;
+        }
+        break;
+    case CARD_TIMER:
+        if (s_timer_done) {
+            go_face();
+        } else if (s_timer_run) {
+            s_timer_left = s_timer_end - s_now;
+            s_timer_run = false;
+            set_text(item_get(IT_HINT) ? item_get(IT_HINT) : item_show(IT_HINT), "Paused");
+            printf("SCENE-ACTION timer pause\n");
+        } else {
+            s_timer_end = s_now + s_timer_left;
+            s_timer_run = true;
+            set_text(item_get(IT_HINT) ? item_get(IT_HINT) : item_show(IT_HINT), "Tap to pause");
+            printf("SCENE-ACTION timer resume\n");
+        }
+        return;
+    default:
+        break;
+    }
+    eyes_ripple(x, y);
+}
+
+// Under the display lock (scene_console).
+static bool scene_show(void)
+{
+    FLOW(f_scene);
+    lv_display_trigger_activity(NULL);
+    return true;
+}
+
 static void on_tap(int x, int y)
 {
     switch (s_mode) {
+    case M_SCENE:
+        scene_tap(x, y);
+        break;
     case M_FACE:
         if (item_get(IT_CHIP) && abs(y - 410) < 30) {
             FLOW(f_recent);
@@ -3225,7 +3466,7 @@ void ui_screen_on(void)
 
 bool ui_keep_awake(void)
 {
-    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD ||
+    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD || (s_mode == M_SCENE && s_timer_run) ||
            ((s_mode == M_SCAN || s_mode == M_JOIN) && net_ui_busy());
 }
 
@@ -3245,6 +3486,9 @@ int ui_console(int argc, char **argv)
                "ui show <face|controls|recent|settings|about|bright|wifi|scan|kbd> | ui expr <name> | ui state | "
                "ui tap <x> <y> | ui swipe <up|down> | ui type <text> | ui done\n");
         return 1;
+    }
+    if (strcmp(argv[1], "scene") == 0) {
+        return scene_console(argc, argv, scene_show);  // takes the display lock itself
     }
     if (bsp_display_lock(1000) != ESP_OK) {
         printf("display busy\n");

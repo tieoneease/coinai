@@ -1,0 +1,50 @@
+# One spoken request per line: <class>|<text>. Classes: local = the coin can answer it itself,
+# act = needs a tool (expect a later card, or a confirm first), live = live or personal data
+# (expect later), timer = the coin's own timer, vague = unclear on purpose.
+local|what's the capital of australia
+local|how far away is the moon
+local|who wrote pride and prejudice
+local|what does photosynthesis mean
+local|what's a fifteen percent tip on eighty four dollars
+local|how many ounces are in a cup
+local|convert seventy two fahrenheit to celsius
+local|what's seventeen times twenty three
+local|how many days until christmas
+local|how long do I boil an egg for a soft yolk
+local|how do I make a basic vinaigrette
+local|what temperature should chicken be cooked to
+local|start a grocery list with eggs milk bread and coffee
+local|what should I pack for a weekend camping trip
+local|give me three ideas for a quick dinner
+local|how do I reset my router
+local|how do I change a flat tire
+local|how do I do CPR
+local|tell me a joke
+local|good morning
+local|I'm bored
+local|thank you
+local|is it safe to eat raw cookie dough
+local|how do you say thank you in japanese
+timer|set a timer for ten minutes
+timer|timer for forty five seconds for the plank
+timer|remind me in twenty minutes to take the laundry out
+timer|start a pomodoro
+act|text Mia that I'm running ten minutes late
+act|call mom
+act|add a dentist appointment tomorrow at three to my calendar
+act|email my boss that I'm sick today
+act|turn off the living room lights
+act|order more paper towels
+act|play some jazz
+act|remind me at eight tonight to call the bank
+act|book a table for two at seven thirty at the usual place
+act|delete all my notes
+live|what's the weather tomorrow
+live|how did the warriors do last night
+live|what's the price of bitcoin right now
+live|when does the pharmacy close
+live|what's on my schedule today
+live|what did I tell you about my trip last week
+vague|what about tomorrow
+vague|the usual
+vague|turn it up
