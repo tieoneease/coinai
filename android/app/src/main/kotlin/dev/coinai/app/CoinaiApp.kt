@@ -61,6 +61,7 @@ class CoinaiApp : Application() {
             store = clips,
             sambot = {
                 val s = settings.sambot.first()
+                require(s.token.isNotBlank()) { "no token set" }
                 SambotClient(s.baseUrl, s.token, http)
             },
             settings = { ProcessingSettings(voicedThresholdMs = settings.voicedThresholdMs.first()) },

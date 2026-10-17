@@ -59,7 +59,15 @@ The emulator runs only with Windows Hypervisor Platform (WHPX) enabled. That nee
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All   # admin PowerShell, then reboot
 ```
 
-The AVD `coinai_api36` (Android 16, Google APIs, x86_64, Pixel 7) is already created. Bluetooth in the emulator is netsim; `coinsim.py`'s default `--ble android-netsim` joins it, and the app finds the coin as `coinai` at C0:1A:51:00:00:01 (static random; see IPC.md, "Bluetooth address"). Pairing asks for the passkey shown on the simulated coin's screen and on the page. netsim itself is verified without the emulator: with `netsimd.exe --no-shutdown` running standalone, `coinsim.py` (default `--ble`) and `central.py --transport android-netsim --random` paired, re-encrypted with the bond, and moved a clip at 35 kB/s with the 15 ms interval applied. **Not yet run:** Android itself, meaning the app's companion-device pairing, background delivery and the emulator's Bluetooth stack. That waits for WHPX.
+The AVD `coinai_api36` (Android 16, Google APIs, x86_64, Pixel 7) is already created. Bluetooth in the emulator is netsim; `coinsim.py`'s default `--ble android-netsim` joins it, and the app finds the coin as `coinai` at C0:1A:51:00:00:01 (static random; see IPC.md, "Bluetooth address"). Pairing asks for the passkey shown on the simulated coin's screen and on the page. netsim itself is verified without the emulator: with `netsimd.exe --no-shutdown` running standalone, `coinsim.py` (default `--ble`) and `central.py --transport android-netsim --random` paired, re-encrypted with the bond, and moved a clip at 35 kB/s with the 15 ms interval applied.
+
+**The app on the emulator (2026-10-17).** Pairing, background visits from Standby (with the app killed, force-stopped, or in forced Doze), Delivery settings, and a voiced clip's failure on the coin all ran; results in android/README.md. Two things to know:
+- **Presence.** The emulator's controller never reports CDM's presence scan, so the phone does not come by itself when the coin wakes. Stand in for that report once the coin advertises:
+  ```bash
+  adb shell cmd companiondevice simulate-device-event <association id> 0   # id from: adb shell dumpsys companiondevice
+  ```
+  A simulated presence lasts 60 s. Send event `1` before the next press, or the next wake is not reported.
+- **Waking the coin to pair.** A PWR tap under 300 ms wakes it from Standby without keeping a clip; the same tap while it is awake sends it to Standby. Android's passkey dialog gives up about 30 s after it appears.
 
 ## Tests
 
@@ -76,7 +84,7 @@ Verified against the hardware's behaviour (2026-10-10): the boot log, the UI, PT
 Not the hardware:
 - **Timing.** Windows threads on a desktop CPU: FreeRTOS priorities and core pinning are ignored, and latencies (`ptttest`, encode times, frame rates) say nothing about the coin. Measure those on the device.
 - **Memory.** `stats` and stack high-water marks report the coin's measured figures and half of each requested stack, not this process. x86-64 stacks are reserved 8× larger.
-- **Radio.** Bumble's controller or netsim, not the ESP32-S3's: no RF, RSSI comes from the slider, and the link-setup HCI timeout seen on the coin (HARDWARE.md, "BLE bring-up") does not happen here. The address is static random, not public.
+- **Radio.** Bumble's controller or netsim, not the ESP32-S3's: no RF, RSSI comes from the slider, and the link-setup HCI timeout seen on the coin (HARDWARE.md, "BLE bring-up") does not happen here. The address is static random, not public. Under the emulator, CDM's presence reports need the shell stand-in above.
 - **Audio.** The host delivers mic audio at the coin's level; the ES7210 gain and ES8311 registers are not modelled.
 - **Display.** LVGL's flushes go to the page; QSPI timing, tearing and the TE line are not modelled.
 - **Power loss.** Cutting power kills the process: a clip loses what was in the C library's buffer, which tests the recovery, but not every way a flash write can tear.

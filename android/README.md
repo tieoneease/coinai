@@ -25,9 +25,28 @@ Settings on the main screen: SamBot, **Delivery** (Wi-Fi first, the default / ph
 
 `SyncService` sends `utc_offset_min` again when the time zone changes during a visit (a context-registered `ACTION_TIMEZONE_CHANGED` receiver); between visits the change reaches the coin with the next session's `HELLO`.
 
-### Not run yet
+Pairing: the chooser creates the association, then `CoinPairing` bonds and starts the first sync once Android reports the bond (CDM reports the coin present during the pairing link already, and a sync started then would time out on the passkey dialog). A bond that fails or is cancelled removes the association again, and the main screen says so. `CoinBleManager` never calls Nordic's `ensureBond()`: in 2.11 it removes an existing bond and pairs again.
 
-The BLE, CDM, foreground-service, worker, notification and UI code compiles and passes lint but has not run on a phone: the firmware's BLE side does not exist yet. `KeystoreSecretBox` needs a real Keystore; its tests use the same AES-GCM with an in-memory key.
+A clip that cannot reach SamBot because the app's SamBot settings are unusable (no token, a bad URL) or because the proxy refuses the token (401, 403, a redirect to its login) ends `FAILED` with a short line for the coin: "Set up SamBot in the coinai app" or "SamBot didn't accept the app's token".
+
+### Run on the Android emulator (2026-10-17)
+
+Against the simulated coin over netsim (sim/README.md, "With the Android emulator"), Android 16 on the emulator:
+- **Pairing:** the chooser, the passkey from the coin's screen, the bond, and the first sync. A wrong passkey leaves no association and the retry note; pairing again then works.
+- **Visits:** Standby, a PWR hold, and the clip on the phone 1.75–2.7 s after release, with the stored bond and no prompt. This held with the app process killed, after `am force-stop`, and in forced Doze (`dumpsys deviceidle force-idle`).
+- **Settings:** Delivery reaches the coin and is stored there.
+- **Processing without a token:** a voiced clip of 4060 ms fails and the coin shows "Didn't reach SamBot / Set up SamBot in the coinai app" about 0.2 s after the clip ends.
+
+The emulator's Bluetooth controller never reports the advertiser tracking that CDM's presence scan uses: 0 results, whatever the address type. So each visit stands in for that one report with `adb shell cmd companiondevice simulate-device-event <association id> 0`, and with event 1 before the next press. Everything after it is the real path: CDM binds `CoinPresenceService`, `SyncService` connects, and so on.
+
+**Not run yet:**
+- the real phone's presence detection and its latency;
+- whether a real presence report also starts a force-stopped app;
+- ColorOS's battery manager;
+- SamBot with a token from the app;
+- OTA.
+
+`KeystoreSecretBox` needs a real Keystore; its tests use the same AES-GCM with an in-memory key.
 
 ## Build and test (Git Bash)
 

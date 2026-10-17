@@ -180,7 +180,12 @@ private fun CoinCard(app: CoinaiApp) {
             launch = { chooser.launch(IntentSenderRequest.Builder(it).build()) },
             onAssociated = {
                 associations = CoinPairing.associations(context).size
-                pairNote = "Paired. Enter the code the coin shows when Android asks for it."
+                pairNote = "Enter the code the coin shows when Android asks for it."
+            },
+            onBonded = { ok ->
+                associations = CoinPairing.associations(context).size
+                pairNote = if (ok) null
+                else "Pairing didn't finish: the code was wrong, or not typed within 30 seconds. Try again."
             },
             onError = { pairNote = "Pairing failed: $it" },
         )

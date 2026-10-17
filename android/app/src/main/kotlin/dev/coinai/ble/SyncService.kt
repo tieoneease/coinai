@@ -44,6 +44,8 @@ import java.util.TimeZone
 class SyncService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var job: Job? = null
+    /** A start arrived during the visit: the coin is (still) there, so a failed visit runs again. */
+    private var startedAgain = false
     private val app get() = application as CoinaiApp
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -59,17 +61,29 @@ class SyncService : Service() {
             return START_NOT_STICKY
         }
         val address = intent?.getStringExtra(EXTRA_ADDRESS)
-        if (job?.isActive == true) return START_NOT_STICKY
+        if (job?.isActive == true) {
+            startedAgain = true
+            return START_NOT_STICKY
+        }
         if (address == null) {
             finish()
             return START_NOT_STICKY
         }
         job = scope.launch {
             try {
-                visit(address)
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                app.log("sync with $address failed: ${e.message}")
+                // Once more at most per extra start: a bond that completes while the first visit is
+                // timing out on the passkey dialog starts the service again (CoinPairing.bond).
+                do {
+                    startedAgain = false
+                    val failed = try {
+                        visit(address)
+                        false
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        app.log("sync with $address failed: ${e.message}")
+                        true
+                    }
+                } while (failed && startedAgain)
             } finally {
                 finish()
             }

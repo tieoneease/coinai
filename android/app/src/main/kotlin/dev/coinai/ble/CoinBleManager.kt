@@ -70,9 +70,12 @@ class CoinBleManager(context: Context, override val deviceAddress: String) : Ble
     override fun initialize() {
         val ctrl = ctrl ?: return
         val data = data ?: return
-        // Characteristic values need authenticated encryption (PROTOCOL.md "Security"). Bonding
-        // first makes Android show its passkey dialog; the coin displays the 6 digits.
-        ensureBond().enqueue()
+        // Characteristic values need authenticated encryption (PROTOCOL.md "Security"), so Android
+        // encrypts with the stored keys when it first touches them. Without a bond this shows the
+        // passkey dialog; the coin displays the 6 digits. Not ensureBond(): with a bond present it
+        // removes the bond and pairs again, so every visit after the first dropped the link and
+        // asked for a new passkey (seen on the emulator, 2026-10-17).
+        createBondInsecure().enqueue()
         // PROTOCOL.md "Link": the data length update to 251 is the controller's job; Android has no
         // API to request it. The coin asks for its 15 ms interval itself during transfer.
         requestMtu(Protocol.MAX_TLV_SIZE + ATT_HEADER).enqueue()

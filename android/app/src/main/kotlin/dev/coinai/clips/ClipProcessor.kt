@@ -89,11 +89,13 @@ class ClipProcessor(
             store.setState(clip.id, ClipState.FAILED, "clip file missing")
             return Outcome.Done
         }
+        val api = client(clip) ?: return Outcome.Done
         replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.TRANSCRIBING, ""))
         val transcript = try {
-            sambot().transcribe(readAudio(path))
+            api.transcribe(readAudio(path))
         } catch (e: IOException) {
-            return retryOrFail(clip, config, attempt, "transcribe: ${e.message}", permanent = e.isPermanent())
+            val reason = e.message.orEmpty().let { if (it.startsWith("transcribe")) it else "transcribe: $it" }
+            return retryOrFail(clip, config, attempt, reason, e)
         }
         if (transcript.isBlank()) {
             store.setState(clip.id, ClipState.NO_SPEECH, "blank transcript")
@@ -109,12 +111,7 @@ class ClipProcessor(
             store.setState(clip.id, ClipState.FAILED, "no transcript to prompt")
             return Outcome.Done
         }
-        val api = try {
-            sambot()
-        } catch (e: IllegalArgumentException) {
-            store.setState(clip.id, ClipState.FAILED, "SamBot settings: ${e.message}")
-            return Outcome.Done
-        }
+        val api = client(clip) ?: return Outcome.Done
         // The claim commits before anything is sent: a crash from here on leaves PROMPTED, which
         // the next run turns into UNCERTAIN instead of prompting again.
         if (!prompting.add(clip.id)) return Outcome.Done
@@ -133,7 +130,7 @@ class ClipProcessor(
             api.ask(text, lane = config.lane, timeout = config.askTimeout)
         } catch (e: PromptNotSentException) {
             store.releasePrompt(clip.id)
-            return retryOrFail(clip, config, attempt, "prompt not sent: ${e.message}", permanent = e.isPermanent())
+            return retryOrFail(clip, config, attempt, "prompt not sent: ${e.message}", e)
         } catch (e: PromptOutcomeUnknownException) {
             store.setState(clip.id, ClipState.UNCERTAIN, e.message)
             replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.FAILED, UNCERTAIN_TEXT))
@@ -155,13 +152,29 @@ class ClipProcessor(
         return Outcome.Done
     }
 
-    private suspend fun retryOrFail(clip: ClipRecord, config: ProcessingSettings, attempt: Int, reason: String, permanent: Boolean): Outcome {
-        if (permanent || attempt + 1 >= config.maxAttempts) {
+    /** The SamBot client, or null after failing the clip when the app's SamBot settings are unusable. */
+    private suspend fun client(clip: ClipRecord): SambotApi? = try {
+        sambot()
+    } catch (e: IllegalArgumentException) {
+        store.setState(clip.id, ClipState.FAILED, "SamBot settings: ${e.message}")
+        replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.FAILED, SETUP_TEXT))
+        null
+    }
+
+    private suspend fun retryOrFail(clip: ClipRecord, config: ProcessingSettings, attempt: Int, reason: String, e: IOException): Outcome {
+        if (e.isPermanent() || attempt + 1 >= config.maxAttempts) {
             store.setState(clip.id, ClipState.FAILED, reason)
-            replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.FAILED, "Failed: $reason"))
+            val text = if (e.isAuthFailure()) TOKEN_TEXT else "Failed: $reason"
+            replies.offer(CoinReply(clip.device, clip.clipId, ReplyState.FAILED, text))
             return Outcome.Done
         }
         return Outcome.Retry(reason)
+    }
+
+    /** The exe.dev proxy refused the token: 401/403, or a redirect to its login page. */
+    private fun IOException.isAuthFailure(): Boolean {
+        val status = (this as? SambotException)?.status ?: return false
+        return status == 401 || status == 403 || status in 300..399
     }
 
     /** HTTP answers that a retry will not change: client errors other than timeout and rate limit. */
@@ -173,5 +186,7 @@ class ClipProcessor(
     companion object {
         const val NO_SPEECH_TEXT = "No speech heard"
         const val UNCERTAIN_TEXT = "Not sure SamBot got it. Resend from the phone."
+        const val SETUP_TEXT = "Set up SamBot in the coinai app"
+        const val TOKEN_TEXT = "SamBot didn't accept the app's token"
     }
 }

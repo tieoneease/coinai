@@ -53,11 +53,13 @@ class ClipProcessorTest {
     private val notified = CopyOnWriteArrayList<Pair<Long, String>>()
     private val coin = CopyOnWriteArrayList<CoinReply>()
     private var settings = ProcessingSettings(askTimeout = 5.seconds)
+    /** Null stands for unusable SamBot settings: the app's factory then throws IllegalArgumentException. */
+    @Volatile private var token: String? = "tok"
 
     private val processor by lazy {
         ClipProcessor(
             store = store,
-            sambot = { SambotClient(server.url("/").toString(), "tok", http) },
+            sambot = { SambotClient(server.url("/").toString(), requireNotNull(token) { "no token set" }, http) },
             settings = { settings },
             notifier = { clip, reply -> notified += clip.id to reply },
             replies = { coin += it },
@@ -280,6 +282,44 @@ class ClipProcessorTest {
         assertEquals(ClipState.REPLIED, state(clip.id))
         assertEquals(1, transcribes.get())
         assertEquals(1, prompts.get())
+    }
+
+    @Test
+    fun unusableSettingsFailTheClipOnTheCoinWithoutAnyRequest() = runBlocking {
+        token = null
+        val clip = received()
+        processor.process(clip.id)
+        assertEquals(ClipState.FAILED, state(clip.id))
+        assertEquals(0, server.requestCount)
+        assertEquals(listOf(ReplyState.FAILED), coin.map { it.state })
+        assertEquals(ClipProcessor.SETUP_TEXT, coin.single().text)
+
+        // A transcript saved by an earlier run goes the same way at the prompt step.
+        coin.clear()
+        val heard = received(state = ClipState.TRANSCRIBED, transcript = "hello")
+        processor.process(heard.id)
+        assertEquals(ClipState.FAILED, state(heard.id))
+        assertEquals(listOf(ReplyState.FAILED), coin.map { it.state })
+    }
+
+    @Test
+    fun refusedTokenSaysSoOnTheCoinOnce() = runBlocking {
+        transcribeResponse = json(401, """{"error":"unauthorized"}""")
+        val clip = received()
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id))
+        assertEquals(ClipState.FAILED, state(clip.id))
+        assertEquals("transcribe: unauthorized", store.rows.getValue(clip.id).error)
+        assertEquals(ClipProcessor.TOKEN_TEXT, coin.last().text)
+
+        transcribeResponse = MockResponse.Builder().code(302).addHeader("Location", "https://exe.dev/login").build()
+        val redirected = received()
+        processor.process(redirected.id)
+        assertEquals(ClipProcessor.TOKEN_TEXT, coin.last().text)
+
+        transcribeResponse = json(400, """{"error":"not audio"}""")
+        val bad = received()
+        processor.process(bad.id)
+        assertEquals("Failed: transcribe: not audio", coin.last().text)
     }
 
     @Test
