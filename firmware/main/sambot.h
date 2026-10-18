@@ -51,9 +51,16 @@ typedef struct {
 } sambot_ask_hooks_t;
 
 // Sends `text` to `lane` and collects the assistant's reply (markdown) until agent_settled or
-// `wait_ms` after the prompt was accepted. SAMBOT_OK means the prompt went out; `*settled` says
+// `wait_ms` after the prompt was accepted (0: returns once it is accepted). SAMBOT_OK means the prompt went out; `*settled` says
 // whether the turn finished in time (the text may be partial otherwise). Failing before the prompt
 // is sent gives SAMBOT_NET, SAMBOT_AUTH, SAMBOT_REFUSED or SAMBOT_ABORTED; a prompt with an
 // unknown outcome gives SAMBOT_UNKNOWN.
 sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, char *reply, size_t reply_len,
                        bool *settled, const sambot_ask_hooks_t *hooks, sambot_err_t *err);
+
+// POST /coin/scene (PROTOCOL.md "Scenes"): the card SamBot's composer makes for `text`. `*scene`
+// gets the scene JSON; `*handoff` the words to prompt SamBot with when the card is `later`, else
+// NULL. Both in PSRAM for the caller to free (NULL unless SAMBOT_OK). The route has no side
+// effects. at_ms 0 and utc_offset_min outside -720..840 are left out of the request.
+sambot_rc_t sambot_scene(const char *text, uint64_t at_ms, int utc_offset_min, char **scene, char **handoff,
+                         sambot_err_t *err);

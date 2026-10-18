@@ -22,6 +22,8 @@ static const char *TAG = "sambot";
 #define TRANSCRIBE_BODY_MAX (256 * 1024)  // the JSON with the transcript: hours of speech
 #define POLL_MS         2500       // after the prompt: how often the coin looks whether the turn is over
 #define WINDOW_MAX      400        // durable events read back for one turn, at most
+#define SCENE_MS        8000       // POST /coin/scene: the composer asks its model at most twice, 3 s each
+#define SCENE_BODY_MAX  8192
 
 static char s_base[128] = "https://sambot.exe.xyz";
 static char s_auth[600];
@@ -719,6 +721,9 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
     if (hooks && hooks->prompted) {
         hooks->prompted(hooks->ctx);
     }
+    if (wait_ms == 0) {
+        return SAMBOT_OK;  // a hand-off: nobody waits for this answer on the coin
+    }
     // 3. Not the live stream: it carries every token delta, each with the whole message so far,
     // megabytes for an answer with thinking. While the lane is busy only its newest durable event is
     // read; once it is idle, the turn's durable events are read back (final messages only).
@@ -758,4 +763,87 @@ sambot_rc_t sambot_ask(const char *text, const char *lane, uint32_t wait_ms, cha
     ESP_LOGI(TAG, "turn %s after %d looks, %u bytes read", *settled ? "settled" : "not settled", looks,
              (unsigned)s_rx);
     return SAMBOT_OK;  // the prompt went out
+}
+
+sambot_rc_t sambot_scene(const char *text, uint64_t at_ms, int utc_offset_min, char **scene, char **handoff,
+                         sambot_err_t *err)
+{
+    *scene = NULL;
+    *handoff = NULL;
+    set_err(err, 0, "", NULL);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "text", text);
+    if (at_ms) {
+        cJSON_AddNumberToObject(o, "at_ms", (double)at_ms);  // exact: below 2^53
+    }
+    if (utc_offset_min >= -720 && utc_offset_min <= 840) {
+        cJSON_AddNumberToObject(o, "utc_offset_min", utc_offset_min);
+    }
+    char *body = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (!body) {
+        set_err(err, 0, "out of memory", NULL);
+        return SAMBOT_NET;
+    }
+    sambot_rc_t rc = SAMBOT_NET;
+    char *resp = NULL;
+    cJSON *j = NULL;
+    esp_http_client_handle_t h = client("/coin/scene", HTTP_METHOD_POST, SCENE_MS);
+    if (!h) {
+        set_err(err, 0, "out of memory", NULL);
+        goto out;
+    }
+    esp_http_client_set_header(h, "Content-Type", "application/json; charset=utf-8");
+    esp_err_t e = esp_http_client_open(h, (int)strlen(body));
+    if (e != ESP_OK) {
+        set_err(err, 0, "scene: connect: %s", esp_err_to_name(e));
+        goto out;
+    }
+    if (!write_all(h, body, (int)strlen(body)) || esp_http_client_fetch_headers(h) < 0) {
+        set_err(err, 0, "scene: no answer", NULL);
+        goto out;
+    }
+    int status = esp_http_client_get_status_code(h);
+    int len = read_body_alloc(h, SCENE_BODY_MAX, &resp);
+    if (auth_status(status)) {
+        set_err(err, status, "token rejected", NULL);
+        rc = SAMBOT_AUTH;
+        goto out;
+    }
+    if (status != 200 || len < 0) {
+        error_detail(len >= 0 ? resp : "", err, status, "scene");
+        rc = status >= 400 && status < 500 ? SAMBOT_REFUSED : SAMBOT_NET;
+        goto out;
+    }
+    j = cJSON_Parse(resp);
+    const cJSON *sc = j ? cJSON_GetObjectItemCaseSensitive(j, "scene") : NULL;
+    const cJSON *ho = j ? cJSON_GetObjectItemCaseSensitive(j, "handoff") : NULL;
+    if (!cJSON_IsObject(sc) || !(cJSON_IsNull(ho) || cJSON_IsString(ho))) {
+        set_err(err, status, "scene: unreadable answer", NULL);
+        goto out;
+    }
+    *scene = cJSON_PrintUnformatted(sc);
+    if (cJSON_IsString(ho)) {
+        size_t n = strlen(ho->valuestring);
+        *handoff = ps_malloc(n + 1);
+        if (*handoff) {
+            memcpy(*handoff, ho->valuestring, n + 1);
+        }
+    }
+    if (!*scene || (cJSON_IsString(ho) && !*handoff)) {
+        free(*scene);
+        free(*handoff);
+        *scene = *handoff = NULL;
+        set_err(err, 0, "out of memory", NULL);
+        goto out;
+    }
+    rc = SAMBOT_OK;
+out:
+    cJSON_Delete(j);
+    free(resp);
+    if (h) {
+        esp_http_client_cleanup(h);
+    }
+    cJSON_free(body);
+    return rc;
 }

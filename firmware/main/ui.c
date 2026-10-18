@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include "bsp/esp-bsp.h"
+#include "audio.h"
 #include "clipstore.h"
 #include "display.h"
 #include "esp_app_desc.h"
@@ -2638,6 +2639,57 @@ static float s_timer_end;           // timer: s_now when it runs out (while runn
 static float s_timer_left;          // timer: seconds left (while paused)
 static bool s_timer_run, s_timer_done;
 
+// A timer card keeps running through Standby (PROTOCOL.md "Scenes"). In its last ALARM_AWAKE_S the
+// coin stays awake and counts down on screen; before that it may sleep. The end is kept in RTC
+// memory as slow-clock ticks, which a clock set by HELLO cannot move, and Standby wakes
+// ALARM_EARLY_US before it: about what a wake takes to draw the screen.
+#define ALARM_MAGIC 0x414C524Du
+#define ALARM_AWAKE_S 60
+#define ALARM_EARLY_US 2500000
+static RTC_DATA_ATTR struct {
+    uint32_t magic;
+    uint64_t end_ticks;
+    int32_t seconds;
+    char label[24];
+} s_alarm;
+static bool s_scene_alarm;  // the scene being shown is the alarm going off
+
+static uint64_t us_to_ticks(int64_t us)
+{
+    int64_t per = power_ticks_to_us(0, 1u << 20);  // microseconds in 2^20 slow-clock ticks
+    return per > 0 && us > 0 ? (uint64_t)((double)us * (double)(1u << 20) / (double)per) : 0;
+}
+
+static int64_t alarm_left_us(void)
+{
+    return power_ticks_to_us(power_rtc_ticks(), s_alarm.end_ticks);
+}
+
+static void alarm_arm(const char *label, int32_t seconds, float left_s)
+{
+    s_alarm.end_ticks = power_rtc_ticks() + us_to_ticks((int64_t)(left_s * 1e6f));
+    s_alarm.seconds = seconds;
+    snprintf(s_alarm.label, sizeof s_alarm.label, "%s", label);
+    s_alarm.magic = ALARM_MAGIC;
+}
+
+static void chime_task(void *arg)
+{
+    for (int i = 0; i < 3; i++) {
+        audio_tone(880, 120);
+        audio_tone(1320, 160);
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    vTaskDelete(NULL);
+}
+
+static void alarm_chime(void)
+{
+    if (!audio_is_recording()) {
+        xTaskCreate(chime_task, "chime", 3072, NULL, 5, NULL);  // audio_tone blocks; not on the UI task
+    }
+}
+
 static void style_check(lv_obj_t *row, bool checked)
 {
     lv_obj_t *ring = lv_obj_get_child(row, 0), *l = lv_obj_get_child(row, 1);
@@ -2732,8 +2784,12 @@ static float f_scene(int k)
         s_scene_page = 0;
         s_timer_done = false;
         s_timer_run = sc->kind == CARD_TIMER && sc->seconds > 0;
-        s_timer_left = (float)sc->seconds;
+        s_timer_left = s_scene_alarm ? 0 : (float)sc->seconds;
         s_timer_end = s_now + s_timer_left;
+        if (s_timer_run && !s_scene_alarm) {
+            alarm_arm(sc->n_lines ? sc->lines[0].text : "Timer", sc->seconds, s_timer_left);
+        }
+        s_scene_alarm = false;
         items_hide_except(0);
         eyes_zzz(false);
         eyes_set_level(0);
@@ -2811,6 +2867,9 @@ static float f_scene(int k)
         eyes_rim(RIM_OFF, lv_color_black());
         eyes_set_expr(EXPR_SURPRISED, M_POP);
         eyes_kick_y(-320);
+        s_alarm.magic = 0;
+        alarm_chime();
+        lv_display_trigger_activity(NULL);  // the screen comes on if it was off
         printf("SCENE-ACTION timer done\n");
         return FLOW_END;
     }
@@ -2876,11 +2935,13 @@ static void scene_tap(int x, int y)
         } else if (s_timer_run) {
             s_timer_left = s_timer_end - s_now;
             s_timer_run = false;
+            s_alarm.magic = 0;  // a paused timer does not wake the coin
             set_text(item_get(IT_HINT) ? item_get(IT_HINT) : item_show(IT_HINT), "Paused");
             printf("SCENE-ACTION timer pause\n");
         } else {
             s_timer_end = s_now + s_timer_left;
             s_timer_run = true;
+            alarm_arm(scene_get()->n_lines ? scene_get()->lines[0].text : "Timer", scene_get()->seconds, s_timer_left);
             set_text(item_get(IT_HINT) ? item_get(IT_HINT) : item_show(IT_HINT), "Tap to pause");
             printf("SCENE-ACTION timer resume\n");
         }
@@ -2897,6 +2958,68 @@ static bool scene_show(void)
     FLOW(f_scene);
     lv_display_trigger_activity(NULL);
     return true;
+}
+
+bool ui_show_scene(uint16_t clip, const char *json, size_t len)
+{
+    // Bounded: a refusal must reach the app within 2 s of the last part (PROTOCOL.md "Scenes").
+    if (bsp_display_lock(1000) != ESP_OK) {
+        return false;
+    }
+    bool ok = scene_load(json, len);
+    if (ok && clip) {  // clip 0: a scene from the console (net scene, ui scene), not an answer
+        char line[200];
+        scene_summary(line, sizeof line);
+        recent_push(clip, 2, line);
+    }
+    if (ok) {
+        // A recording started since keeps its screen; the card is in the recent list.
+        if (!audio_is_recording() && s_mode != M_LISTEN && s_mode != M_POWERHOLD) {
+            scene_show();
+        }
+    }
+    bsp_display_unlock();
+    return ok;
+}
+
+// Under the display lock (tick_cb): a timer whose card is gone (another scene, a wake) goes off.
+static void alarm_check(void)
+{
+    if (s_alarm.magic != ALARM_MAGIC || alarm_left_us() > 0 || audio_is_recording()) {
+        return;
+    }
+    if (s_mode == M_SCENE && scene_get()->kind == CARD_TIMER && (s_timer_run || s_timer_done)) {
+        return;  // its own card is counting down, or already went off
+    }
+    bool calm = s_mode == M_FACE || s_mode == M_DROWSY || s_mode == M_SCENE ||
+                (is_content(s_mode) && s_mode <= M_DETAIL && s_mode != M_PAIRED && s_mode != M_PAIRFAIL);
+    if (!calm) {
+        return;
+    }
+    char json[160];
+    char label[24];
+    scene_ascii(label, sizeof label, s_alarm.label);
+    for (char *c = label; *c; c++) {
+        if (*c == '"' || *c == '\\') {
+            *c = '\'';
+        }
+    }
+    snprintf(json, sizeof json, "{\"mood\":\"surprised\",\"card\":{\"kind\":\"timer\",\"label\":\"%s\",\"seconds\":%d}}",
+             label, (int)(s_alarm.seconds > 0 ? s_alarm.seconds : 1));
+    s_alarm.magic = 0;
+    if (scene_load(json, strlen(json))) {
+        s_scene_alarm = true;
+        scene_show();
+    }
+}
+
+uint32_t ui_alarm_standby_s(void)
+{
+    if (s_alarm.magic != ALARM_MAGIC) {
+        return 0;
+    }
+    int64_t left = alarm_left_us() - ALARM_EARLY_US;
+    return left > 1000000 ? (uint32_t)(left / 1000000) : 1;
 }
 
 static void on_tap(int x, int y)
@@ -3327,6 +3450,7 @@ static void tick_cb(lv_timer_t *t)
         handle_event(&m);
     }
     react();
+    alarm_check();
     if (s_mode == M_POWERHOLD) {
         squeeze_progress(s_now - s_t0, 3.0f);
         // app_main cancels when either button comes up. Should that event be missed (it can arrive
@@ -3466,7 +3590,7 @@ void ui_screen_on(void)
 
 bool ui_keep_awake(void)
 {
-    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD || (s_mode == M_SCENE && s_timer_run) ||
+    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD || (s_alarm.magic == ALARM_MAGIC && alarm_left_us() <= ALARM_AWAKE_S * 1000000LL) ||
            ((s_mode == M_SCAN || s_mode == M_JOIN) && net_ui_busy());
 }
 
@@ -3601,6 +3725,10 @@ int ui_console(int argc, char **argv)
     } else if (strcmp(argv[1], "state") == 0) {
         printf("ui: mode %s, flow %s, expr %s, eyes y %.0f, demo %s\n", MODE_NAMES[s_mode], s_flow ? s_flow_name : "-",
                eyes_expr_name(eyes_expr()), eyes_y(), DEMO_NAMES[s_demo]);
+        if (s_alarm.magic == ALARM_MAGIC) {
+            printf("ui: timer \"%s\" ends in %lld ms\n", s_alarm.label, (long long)(alarm_left_us() / 1000));
+        }
+        printf("ui: keeps the coin awake: %s\n", ui_keep_awake() ? "yes" : "no");
     } else {
         printf("unknown ui command\n");
         rc = 1;

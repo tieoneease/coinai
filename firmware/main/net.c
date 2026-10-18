@@ -738,6 +738,7 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
     char path[32];
     clipstore_path(id, path, sizeof path);
     char *text = NULL;  // the transcript, from sambot_transcribe
+    char *handoff = NULL;  // a `later` card's words for SamBot (sambot_scene)
     char *reply = heap_caps_calloc(1, REPLY_MAX, MALLOC_CAP_SPIRAM);
     if (!reply) {
         return D_RETRY;
@@ -788,16 +789,45 @@ static dres_t deliver(uint16_t id, int64_t join_ms)
         goto out;
     }
     say(id, 1, s);  // what SamBot heard, while the coin waits
+
+    // PROTOCOL.md "Scenes": the composer's card first. A `later` card hands the words to SamBot
+    // without waiting for its answer; any other card is the answer. Anything but a card the coin
+    // can show falls back to prompting with the transcript and waiting, as before.
     uint32_t wait_ms = settings_get(SET_REPLY_WAIT_S) * 1000u;
+    const char *ask = s;
+    bool shown = false;
+    {
+        char *scene = NULL;
+        sambot_err_t serr = {0};
+        int64_t t_sc = now_us();
+        sambot_rc_t src = sambot_scene(s, meta.start_utc_ms, (int16_t)settings_get(SET_UTC_OFFSET_MIN), &scene,
+                                       &handoff, &serr);
+        shown = src == SAMBOT_OK && ble_show_scene(id, scene, strlen(scene));
+        ESP_LOGI(TAG, "clip %u: scene %s after %lld ms%s%s", id, shown ? "shown" : sambot_rc_name(src),
+                 (now_us() - t_sc) / 1000, serr.detail[0] ? ": " : "", serr.detail);
+        if (shown && !handoff) {
+            clipstore_remove(id);  // answered by the composer: nothing goes to SamBot's conversation
+            free(scene);
+            res = D_DONE;
+            goto out;
+        }
+        if (shown) {
+            ask = handoff[0] ? handoff : s;
+            wait_ms = 0;
+        }
+        free(scene);
+    }
     bool settled = false;
     const sambot_ask_hooks_t hooks = {.before_prompt = before_prompt, .prompted = on_prompted, .ctx = &job};
-    rc = sambot_ask(s, LANE, wait_ms, reply, REPLY_MAX, &settled, &hooks, &err);
+    rc = sambot_ask(ask, LANE, wait_ms, reply, REPLY_MAX, &settled, &hooks, &err);
     int64_t t_end = now_us();
     mem_log("asked");
     ESP_LOGI(TAG, "net task stack: %u bytes never used", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     switch (rc) {
     case SAMBOT_OK:
-        if (settled) {
+        if (shown) {
+            // the `later` card stays: its answer comes in the app and SamBot's web client
+        } else if (settled) {
             say(id, 2, reply);
         } else {
             ble_note_reply(id, -1, "");  // the rest lands in SamBot's web lane
@@ -846,6 +876,7 @@ out:
         memset(text, 0, strlen(text));
         free(text);
     }
+    free(handoff);
     free(reply);
     return res;
 }
@@ -876,6 +907,7 @@ static uint16_t claim_next(void)
 }
 
 static void net_step(void);
+static void scene_step(void);
 
 static void net_task(void *arg)
 {
@@ -885,6 +917,7 @@ static void net_task(void *arg)
         xSemaphoreTake(s_radio, portMAX_DELAY);
         bool was_on = s_wifi_init;
         ui_step();
+        scene_step();
         net_step();
         if (!s_wifi_init && (was_on || s_tried)) {
             mem_log("Wi-Fi off");
@@ -892,6 +925,50 @@ static void net_task(void *arg)
         s_tried = false;
         xSemaphoreGive(s_radio);
     }
+}
+
+// `net scene`: words typed on the console, composed like a clip's transcript (no clip, no prompt).
+static char *s_scene_words;  // s_lock; PSRAM, the net task frees it
+
+static void scene_step(void)
+{
+    lock();
+    char *words = s_scene_words;
+    s_scene_words = NULL;
+    unlock();
+    if (!words) {
+        return;
+    }
+    if (!configured()) {
+        printf("net scene: not configured (wifi add, net token)\n");
+        free(words);
+        return;
+    }
+    sambot_begin();
+    int64_t join_ms = 0;
+    if (!join(&join_ms)) {
+        printf("net scene: no Wi-Fi after %lld ms\n", join_ms);
+        free(words);
+        return;
+    }
+    char *scene = NULL, *handoff = NULL;
+    sambot_err_t err = {0};
+    int64_t t0 = now_us();
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t at_ms = tv.tv_sec > 1600000000 ? (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
+    sambot_rc_t rc = sambot_scene(words, at_ms, (int16_t)settings_get(SET_UTC_OFFSET_MIN), &scene, &handoff, &err);
+    int64_t ms = (now_us() - t0) / 1000;
+    bool shown = rc == SAMBOT_OK && ble_show_scene(0, scene, strlen(scene));
+    printf("net scene: %s after %lld ms (join %lld ms)%s%s\n", rc == SAMBOT_OK ? (shown ? "shown" : "not showable")
+           : sambot_rc_name(rc), ms, join_ms, err.detail[0] ? ": " : "", err.detail);
+    if (rc == SAMBOT_OK) {
+        printf("net scene: handoff %s\n", handoff ? handoff : "none");
+    }
+    s_linger_until_us = now_us() + LINGER_MS * 1000LL;
+    free(scene);
+    free(handoff);
+    free(words);
 }
 
 // One pass of the net task, holding s_radio.
@@ -1442,12 +1519,36 @@ static int cmd_net(int argc, char **argv)
         printf("%s\n", err == ESP_OK ? "token stored" : esp_err_to_name(err));
         return err != ESP_OK;
     }
+    if (argc >= 3 && strcmp(argv[1], "scene") == 0) {
+        size_t n = 0;
+        for (int i = 2; i < argc; i++) {
+            n += strlen(argv[i]) + 1;
+        }
+        char *words = heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM);
+        if (!words) {
+            return 1;
+        }
+        for (int i = 2; i < argc; i++) {
+            strcat(words, argv[i]);
+            if (i + 1 < argc) {
+                strcat(words, " ");
+            }
+        }
+        lock();
+        free(s_scene_words);
+        s_scene_words = words;
+        unlock();
+        xEventGroupSetBits(s_ev, EV_KICK);
+        printf("composing\n");
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[1], "url") == 0) {
         err = net_set_url(argv[2]);
         printf("%s\n", err == ESP_OK ? "ok" : "usage: net url https://host");
         return err != ESP_OK;
     }
-    printf("usage: net | net send [clip] | net mode wifi|phone-first|phone | net token <token>|clear | net url <url>\n");
+    printf("usage: net | net send [clip] | net scene <words> | net mode wifi|phone-first|phone | net token <token>|clear | "
+           "net url <url>\n");
     return 1;
 }
 
@@ -1456,7 +1557,8 @@ esp_err_t net_console_register(void)
     const esp_console_cmd_t cmds[] = {
         {.command = "wifi", .help = "Wi-Fi networks: wifi | wifi add <ssid> [password] | wifi forget <ssid|all> | wifi scan",
          .func = cmd_wifi},
-        {.command = "net", .help = "Wi-Fi delivery: net | net send [clip] | net mode wifi|phone-first|phone | "
+        {.command = "net", .help = "Wi-Fi delivery: net | net send [clip] | net scene <words> (compose and show a "
+                                    "card; no clip, no prompt) | net mode wifi|phone-first|phone | "
                                     "net token <token>|clear | net url <url>",
          .func = cmd_net},
     };

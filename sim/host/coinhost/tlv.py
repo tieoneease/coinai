@@ -10,12 +10,13 @@ SERVICE_UUID = 'c0a10000-f569-41ae-8676-7f5a60d835fc'
 CTRL_UUID = 'c0a10001-f569-41ae-8676-7f5a60d835fc'
 DATA_UUID = 'c0a10002-f569-41ae-8676-7f5a60d835fc'
 
-HELLO, LIST, GET, ACK, WIFI_SET, CFG_SET, REPLY = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+HELLO, LIST, GET, ACK, WIFI_SET, CFG_SET, REPLY, SCENE = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
+SCENE_PART = 237  # JSON bytes per SCENE message (PROTOCOL.md "Scenes")
 STATUS, CLIP_STARTED, CLIP_ENDED, LIST_RESULT, ERROR = 0x81, 0x82, 0x83, 0x84, 0x85
 
 NAMES = {
     HELLO: 'HELLO', LIST: 'LIST', GET: 'GET', ACK: 'ACK', WIFI_SET: 'WIFI_SET', CFG_SET: 'CFG_SET',
-    REPLY: 'REPLY', STATUS: 'STATUS', CLIP_STARTED: 'CLIP_STARTED', CLIP_ENDED: 'CLIP_ENDED',
+    REPLY: 'REPLY', SCENE: 'SCENE', STATUS: 'STATUS', CLIP_STARTED: 'CLIP_STARTED', CLIP_ENDED: 'CLIP_ENDED',
     LIST_RESULT: 'LIST_RESULT', ERROR: 'ERROR',
 }
 CFG_KEYS = {1: 'reply_wait_s', 2: 'brightness', 3: 'idle_timeout_s', 4: 'off_after_h'}
@@ -74,6 +75,13 @@ def reply(clip: int, state: int, text: str) -> bytes:
     return tlv(REPLY, struct.pack('<HB', clip, state) + text.encode('utf-8')[:200])
 
 
+def scene(clip: int, json_text: str) -> list[bytes]:
+    """A scene as its SCENE messages, in order."""
+    b = json_text.encode('utf-8')
+    chunks = [b[i:i + SCENE_PART] for i in range(0, len(b), SCENE_PART)] or [b'']
+    return [tlv(SCENE, struct.pack('<HBB', clip, i, len(chunks)) + c) for i, c in enumerate(chunks)]
+
+
 # ---------------------------------------------------------------- device -> app encoders (fake coin, tests)
 def status(battery_pct: int, flags: int, pending: int, fw_version: str) -> bytes:
     return tlv(STATUS, struct.pack('<BBH', battery_pct, flags, pending) + fw_version.encode()[:32])
@@ -123,9 +131,12 @@ def describe_one(t: int, v: bytes) -> str:
         if t == REPLY:
             (clip, st), text = _fields('<HB', v)
             return f'REPLY clip={clip} {REPLY_STATES.get(st, st)} "{text.decode("utf-8", "replace")}"'
+        if t == SCENE:
+            (clip, part, parts), body = _fields('<HBB', v)
+            return f'SCENE clip={clip} part {part + 1}/{parts} ({len(body)} bytes)'
         if t == STATUS:
             (pct, flags, pending), fw = _fields('<BBH', v)
-            bits = [n for b, n in ((1, 'charging'), (2, 'usb'), (4, 'recording')) if flags & b]
+            bits = [n for b, n in ((1, 'charging'), (2, 'usb'), (4, 'recording'), (8, 'scenes')) if flags & b]
             pct_s = 'unknown' if pct == 255 else f'{pct}%'
             return f'STATUS battery={pct_s} flags=[{",".join(bits)}] pending={pending} fw="{fw.decode("utf-8", "replace")}"'
         if t == CLIP_STARTED:

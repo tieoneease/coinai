@@ -12,6 +12,7 @@ import zlib
 
 import pytest
 
+from coinhost import tlv
 from test_ble_e2e import HOST, PY, central, free_port, get, post, wait
 
 COIN = HOST.parent / 'coin' / 'build' / 'coinsim.exe'
@@ -125,6 +126,62 @@ def test_real_coin(rig):
     post(f'{api}/api/input', {'touch': {'pressed': True, 'x': 233, 'y': 350}})
     post(f'{api}/api/input', {'touch': {'pressed': False, 'x': 233, 'y': 350}})
     wait_line(api, seq, r'touch down at 233,350')
+
+
+def test_scenes(rig):
+    """PROTOCOL.md "Scenes": STATUS says the coin shows scenes; a two-part SCENE is shown and ends the reply window; one
+    the coin cannot show (no card) gets ERROR 5 and leaves the screen alone."""
+    phone_port, api, tmp = rig
+    vectors = json.loads((HOST.parent.parent / 'protocol' / 'vectors' / 'v1.json').read_text())
+    split = vectors['scene_split'][0]
+    keys = tmp / 'phone_keys.json'
+
+    def reply_window():
+        seq = console_seq(api)
+        post(f'{api}/api/console', {'line': 'ble'})
+        return wait_line(api, seq, r'reply window (\w+)').group(1)
+
+    # The ACK of a clip opens the reply window (rule 7), and the phone says it is thinking.
+    clip, _ = record(api, 3000)
+    r, out = central(phone_port, api, 'hello', f'get {clip} 0', 'wait 0.3', f'ack {clip} last',
+                     f'reply {clip} 1 How do I reset my router?', 'wait 0.3', keys=keys)
+    assert 'error' not in r, out
+    assert 'scenes' in r['indications'][0], r['indications']
+    assert reply_window() == 'open'
+
+    # Its answer comes as a scene in two parts.
+    seq = console_seq(api)
+    r, out = central(phone_port, api, 'hello', f'scene {clip} {split["json"]}', 'wait 0.8', keys=keys)
+    assert 'error' not in r, out
+    shown = wait_line(api, seq, rf'SCENE clip {clip}: (\d+) bytes, shown')
+    assert shown.group(1) == str(len(split['json'].encode()))
+    assert not any(i.startswith('ERROR') for i in r['indications']), r['indications']
+    assert ui_mode(api) == 'scene'
+    assert reply_window() == 'closed'
+
+    # One without a card cannot be shown: ERROR 5, and the card stays.
+    r, out = central(phone_port, api, 'hello', 'scene 10 {"say":"hi","mood":"happy"}', 'wait 0.8', keys=keys)
+    assert 'ERROR request=SCENE code=5 (invalid value) clip=10' in r['indications'], r['indications']
+    assert ui_mode(api) == 'scene'
+
+
+def test_scene_timer_through_standby(rig):
+    """A timer card keeps running through Standby: the coin sleeps on its idle timeout with a timer wake, wakes before
+    the end and shows the timer run out (about 75 s)."""
+    phone_port, api, tmp = rig
+    post(f'{api}/api/input', {'usb': False})
+    post(f'{api}/api/console', {'line': 'ble inject 060300030500'})  # CFG_SET idle_timeout_s 5
+    timer = json.dumps({'say': 'On it.', 'mood': 'focus', 'card': {'kind': 'timer', 'label': 'Pasta', 'seconds': 72}})
+    seq = console_seq(api)
+    t0 = time.monotonic()
+    post(f'{api}/api/console', {'line': 'ble inject ' + tlv.scene(5, timer)[0].hex()})
+    wait_line(api, seq, r'SCENE clip 5: \d+ bytes, shown')
+    sleep_s = int(wait_line(api, seq, r'standby: timer (\d+) s', timeout=20).group(1))
+    assert 60 <= sleep_s <= 68, sleep_s  # 72 s less the idle timeout and the early wake
+    wait_line(api, seq, r'wake: timer', timeout=80)
+    wait_line(api, seq, r'SCENE-ACTION timer done', timeout=10)
+    assert 71 < time.monotonic() - t0 < 76
+    assert ui_mode(api) == 'scene'
 
 
 # The on-screen keyboard's keys (firmware/main/kbd.c): row centres and the first key's left edge.

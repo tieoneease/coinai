@@ -51,6 +51,12 @@ uint16_t ble_claimed_clip(void);  // 0 = none
 // A reply that came another way (Wi-Fi), shown as if the phone had sent REPLY: state 0-1 opens the
 // reply window (reply_wait_s), 2-3 closes it; -1 closes it without a reply.
 void ble_note_reply(uint16_t clip, int state, const char *text);
+// Shows a scene (PROTOCOL.md "Scenes"): false when it cannot be shown at all. Called on the BLE
+// worker task with the reassembled JSON.
+typedef bool (*ble_scene_fn)(uint16_t clip, const char *json, size_t len);
+void ble_set_scene_handler(ble_scene_fn fn);
+// Shows a scene that came another way (Wi-Fi) through the same handler.
+bool ble_show_scene(uint16_t clip, const char *json, size_t len);
 // Bench mode: protocol messages accepted without pairing, until the next reboot. USB console only.
 void ble_set_bench(bool on);
 // USB console test link (`ble inject <hex>`): feeds one ctrl TLV to the protocol worker as if the

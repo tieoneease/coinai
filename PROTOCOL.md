@@ -141,7 +141,8 @@ The coin is the final check. Text that does not fit its line is cut with "...". 
 **Over BLE** (`SCENE`, `0x08`): the app sends a scene only to a coin whose `STATUS` has bit 3 set. Otherwise it sends `REPLY` as before.
 - The JSON is split into 1–8 parts of at most 237 bytes, sent in order.
 - Part 0 starts a new scene. A part that does not continue the one being received (another clip, a gap, a different `parts`) drops it, with `ERROR` code 5.
-- After the last part the coin shows the card. That ends the clip's reply window like a `REPLY` `done`, and the normal idle timeout follows. An accepted `SCENE` gets no answer.
+- After the last part the coin shows the card. That ends the clip's reply window like a `REPLY` `done`, and the normal idle timeout follows.
+- An accepted `SCENE` gets no answer. A refused one gets its `ERROR` within 2 s of the last part, so silence after that means the card is shown.
 
 **The composer** is a SamBot route, `POST /coin/scene`, reached like the other routes (through the proxy, with the token):
 
@@ -164,12 +165,15 @@ response  200 {"scene": {...}, "handoff": "<text for SamBot>" | null, "issues": 
 
 A scene answered by the composer alone (not `later`) is not in SamBot's conversation. The app keeps it with the clip.
 
+**Status (2026-10-18):** the route is live on SamBot. In the simulator the firmware shows one- and two-part scenes over BLE and refuses bad ones with `ERROR` 5. A timer card ran through Standby: the coin slept with an 87 s timer wake, woke 2.5 s early and chimed at the end. Not yet run on the device.
+
 ## Wi-Fi delivery
 
 With a known network (`WIFI_SET`) and a SamBot token stored, the coin can send clips to SamBot itself (PLAN.md D10). It makes the app's calls: `POST /voice/transcribe`, then `GET /events?lane=web&tail=1` until `host_stream_live` (whose `historyTotal` marks where the lane's transcript ends), and `POST /prompt`, through the exe.dev proxy with the token in `X-Exedev-Authorization`. For the reply it does not hold the live stream, which carries every token delta (`message_update`, each with the whole message so far): megabytes for an answer with thinking, more than the coin reads in time. Instead it looks every 2.5 s with `tail=1`, reading only up to `host_stream_live`. Once `busy` is false and `historyTotal` has grown, it reads the turn's durable events back (`tail` = the growth) and takes the assistant's text from their `message_end` and the end of the turn from `agent_settled`. The coin shows the progress and reply as if the app had sent `REPLY`. The prompt goes out at most once: the coin marks the clip on flash before `POST /prompt`, and a clip so marked is deleted at the next boot instead of being sent again.
 
 - **`delivery` (`CFG_SET` key `0x06`):** 0 = Wi-Fi first: a new recording is the coin's from its first byte, and goes to the phone only if no known network answers or SamBot is not reached. 1 = phone first: Wi-Fi only when no phone is connected when the clip ends. 2 = phone only. Clips left from earlier go over Wi-Fi in the background in modes 0 and 1.
 - **Left to the phone:** clips below the voiced threshold (the app keeps them as "no speech"), clips the phone received in full but has not `ACK`ed yet, and everything while the battery is below 3.6 V off USB power.
+- **Scenes:** after the transcript the coin asks `POST /coin/scene` (8 s at most), as in "Scenes". A card other than `later` is the answer: the clip is deleted and nothing is prompted. A `later` card's hand-off is prompted without waiting for the answer. Anything else falls back to prompting the transcript and waiting, as above.
 - **Networks** also come from the coin's own Settings > Wi-Fi screen (PLAN.md D18); `WIFI_SET` and the screen share the same list of 4.
 - **The token** is set over the USB console (`net token`), never sent back. It is an exe.dev API token scoped to the SamBot VM.
 - **Firmware status:** runs on a real network (2026-10-13): a 5 s test clip got its reply on the coin 22.8 s after `net send`: join 2.2 s, upload and transcription 2.5 s, prompt accepted 3.1 s later, then 15.0 s until the coin had the reply (SamBot answered after 8.9 s; the rest was the coin noticing, one TLS connection per look); the event reads came to 3.6 KB over 4 looks. The first real clip, sent while the coin still held the live stream, reached SamBot but its 1,958-character reply never reached the coin within the 45 s wait.

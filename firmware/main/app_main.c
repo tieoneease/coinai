@@ -416,7 +416,7 @@ static void control_loop(lv_display_t *disp)
             // TAP_DELIVERY_S for a phone that has not connected yet.
             delivering = delivering && (bs.connected || now - standby_req_us < TAP_DELIVERY_S * 1000000LL);
             if (!(audio_is_recording() || s_wake_hold || bs.passkey || delivering || net_sending())) {
-                power_enter_standby(0, false);
+                power_enter_standby(ui_alarm_standby_s(), false);
             }
             continue;
         }
@@ -444,7 +444,7 @@ static void control_loop(lv_display_t *disp)
                 if (audio_is_recording() || s_wake_hold) {
                     continue;  // PWR went down during the goodbye
                 }
-                power_enter_standby(0, false);
+                power_enter_standby(ui_alarm_standby_s(), false);
             } else if (!screen_off) {
                 ESP_LOGI(TAG, "idle on USB power: screen off");
                 ui_goodbye(UI_BYE_SCREEN_OFF);
@@ -535,6 +535,7 @@ void app_main(void)
     }
     diag_mem_mark("ui");
     esp_err_t ble_err = ble_init();
+    ble_set_scene_handler(ui_show_scene);
     diag_mem_mark("ble");
     if (ble_err == ESP_OK) {
         ble_status_t bs;

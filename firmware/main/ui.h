@@ -69,6 +69,10 @@ void ui_set_drowsy(bool drowsy);
 // True while the UI needs the coin awake without input: a `ui demo` runs, or a hold-to-confirm is held.
 // Lock-free.
 bool ui_keep_awake(void);
+// Shows a scene from the phone or SamBot (ble_scene_fn); false when it cannot be shown at all.
+bool ui_show_scene(uint16_t clip, const char *json, size_t len);
+// Seconds of Standby before a running timer card needs the coin again; 0 without one.
+uint32_t ui_alarm_standby_s(void);
 // Uptime in ms of the UI's last tick (every 15 ms while LVGL runs); 0 before the first. Lock-free.
 uint32_t ui_heartbeat_ms(void);
 // Console: ui perf [reset] | ui demo <flow> | ui show <screen> | ui expr <name>

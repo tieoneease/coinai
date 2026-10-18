@@ -537,6 +537,21 @@ static int hexval(char c)
     return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
 }
 
+void scene_summary(char *dst, size_t n)
+{
+    const scene_t *s = &s_scene;
+    size_t used = 0;
+    dst[0] = 0;
+    if (s->kind == CARD_TIMER) {
+        used += snprintf(dst, n, "%d:%02d", (int)(s->seconds / 60), (int)(s->seconds % 60));
+    } else if (s->value[0]) {
+        used += snprintf(dst + used, n - used, "%s%s%s", s->value, s->unit[0] ? " " : "", s->unit);
+    }
+    for (int i = 0; i < s->n_lines && used + 1 < n; i++) {
+        used += snprintf(dst + used, n - used, "%s%s", used ? " " : "", s->lines[i].text);
+    }
+}
+
 static void print_result(bool shown)
 {
     scene_t *s = &s_scene;

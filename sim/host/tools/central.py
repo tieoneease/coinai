@@ -9,7 +9,8 @@ write; on ATT 0x05 (Insufficient Authentication) pair with LE Secure Connections
 typing the passkey the coin shows (--passkey, or fetched from the host's GET /api/state), then retry the write.
 
 Commands: hello | list | get CLIP [OFFSET] | ack CLIP CRC32HEX|last | cfg KEY VALUE | reply CLIP STATE TEXT |
-          wifi SSID PASSWORD | raw HEX | wait SECONDS | read-dis | read-battery | disconnect
+          scene CLIP JSON (all its SCENE parts) | wifi SSID PASSWORD | raw HEX | wait SECONDS | read-dis |
+          read-battery | disconnect
 The last line of output is `RESULT {json}` with everything received.
 """
 
@@ -282,6 +283,12 @@ class Central:
             value = tlv.cfg_set(int(a[0]), int(a[1]))
         elif name == 'reply':
             value = tlv.reply(int(a[0]), int(a[1]), ' '.join(a[2:]))
+        elif name == 'scene':  # scene <clip> <json without spaces>: every part, in order
+            parts = tlv.scene(int(a[0]), ' '.join(a[1:]))
+            for part in parts[:-1]:
+                if not await self.write(peer, ctrl, part, connection):
+                    return False
+            value = parts[-1]
         elif name == 'wifi':
             value = tlv.wifi_set(a[0].encode(), a[1].encode())
         elif name == 'raw':

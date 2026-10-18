@@ -26,7 +26,7 @@ static const char *TAG = "ble";
 
 enum {
     MSG_HELLO = 0x01, MSG_LIST = 0x02, MSG_GET = 0x03, MSG_ACK = 0x04, MSG_WIFI_SET = 0x05, MSG_CFG_SET = 0x06,
-    MSG_REPLY = 0x07,
+    MSG_REPLY = 0x07, MSG_SCENE = 0x08,
     MSG_STATUS = 0x81, MSG_CLIP_STARTED = 0x82, MSG_CLIP_ENDED = 0x83, MSG_LIST_RESULT = 0x84, MSG_ERROR = 0x85,
 };
 enum { ERR_UNKNOWN_CLIP = 1, ERR_BAD_OFFSET = 2, ERR_BAD_LENGTH = 3, ERR_BUSY = 4, ERR_INVALID = 5 };
@@ -36,6 +36,8 @@ enum { ERR_UNKNOWN_CLIP = 1, ERR_BAD_OFFSET = 2, ERR_BAD_LENGTH = 3, ERR_BUSY = 
 #define LIST_PER_MSG   34
 #define MAX_LIST       256
 #define FAST_ADV_MS    30000
+#define SCENE_PART     237   // PROTOCOL.md "Scenes": 244 - TLV header - clip, part, parts
+#define SCENE_PARTS    8
 
 typedef enum {
     EV_RX, EV_CLIP_STARTED, EV_CLIP_FINISHED, EV_STATUS, EV_CLIPS_CHANGED, EV_CONNECTED, EV_DISCONNECTED,
@@ -222,7 +224,7 @@ static void send_status(void)
     uint8_t v[4 + 32];
     xSemaphoreTake(s_lock, portMAX_DELAY);
     v[0] = s_dev.battery_pct < 0 ? 255 : (uint8_t)s_dev.battery_pct;
-    v[1] = (s_dev.charging ? 1 : 0) | (s_dev.usb ? 2 : 0) | (s_dev.recording ? 4 : 0);
+    v[1] = (s_dev.charging ? 1 : 0) | (s_dev.usb ? 2 : 0) | (s_dev.recording ? 4 : 0) | 8;  // bit 3: shows scenes
     put16(v + 2, s_dev.pending);
     xSemaphoreGive(s_lock);
     char ver[40];  // fw_version is at most 32 bytes on the wire
@@ -532,6 +534,62 @@ static void handle_reply(const uint8_t *v, uint16_t len)
     ESP_LOGI(TAG, "REPLY clip %u state %u: %.40s", get16(v), v[2], (const char *)v + 3);
 }
 
+// SCENE: the scene JSON in 1-8 parts, in order (PROTOCOL.md "Scenes"). One scene is assembled at
+// a time; a part that does not continue it drops it.
+EXT_RAM_BSS_ATTR static char s_scene_buf[SCENE_PART * SCENE_PARTS + 1];
+static size_t s_scene_len;
+static uint16_t s_scene_clip;
+static uint8_t s_scene_next, s_scene_parts;  // s_scene_parts 0: nothing being assembled
+static ble_scene_fn s_scene_fn;
+
+void ble_set_scene_handler(ble_scene_fn fn)
+{
+    s_scene_fn = fn;
+}
+
+bool ble_show_scene(uint16_t clip, const char *json, size_t len)
+{
+    return s_scene_fn && s_scene_fn(clip, json, len);
+}
+
+static void handle_scene(const uint8_t *v, uint16_t len)
+{
+    if (len < 4 || len > 4 + SCENE_PART) {
+        s_scene_parts = 0;
+        send_error(MSG_SCENE, ERR_BAD_LENGTH, len >= 2 ? get16(v) : 0xFFFF);
+        return;
+    }
+    uint16_t clip = get16(v);
+    uint8_t part = v[2], parts = v[3];
+    bool starts = part == 0 && parts >= 1 && parts <= SCENE_PARTS;
+    bool continues = s_scene_parts && clip == s_scene_clip && parts == s_scene_parts && part == s_scene_next;
+    if (!starts && !continues) {
+        s_scene_parts = 0;
+        send_error(MSG_SCENE, ERR_INVALID, clip);
+        return;
+    }
+    if (starts) {
+        s_scene_clip = clip;
+        s_scene_parts = parts;
+        s_scene_next = 0;
+        s_scene_len = 0;
+    }
+    memcpy(s_scene_buf + s_scene_len, v + 4, len - 4);
+    s_scene_len += len - 4;
+    if (++s_scene_next < s_scene_parts) {
+        return;
+    }
+    s_scene_parts = 0;
+    s_scene_buf[s_scene_len] = 0;
+    bool shown = s_scene_fn && s_scene_fn(clip, s_scene_buf, s_scene_len);
+    ESP_LOGI(TAG, "SCENE clip %u: %u bytes, %s", clip, (unsigned)s_scene_len, shown ? "shown" : "refused");
+    if (!shown) {
+        send_error(MSG_SCENE, ERR_INVALID, clip);  // the app sends the card as REPLY text instead
+        return;
+    }
+    set_reply_window(false);  // rule 7: a scene ends the window like a done REPLY
+}
+
 static void handle_rx(const uint8_t *b, uint16_t len)
 {
     if (len < 3 || get16(b + 1) != len - 3) {
@@ -580,6 +638,9 @@ static void handle_rx(const uint8_t *b, uint16_t len)
         break;
     case MSG_REPLY:
         handle_reply(v, vlen);
+        break;
+    case MSG_SCENE:
+        handle_scene(v, vlen);
         break;
     default:
         break;  // rule 5: unknown types are ignored

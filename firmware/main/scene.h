@@ -61,6 +61,8 @@ typedef struct {
 // kind). Either way scene_get()->issues says what was wrong.
 bool scene_load(const char *json, size_t len);
 scene_t *scene_get(void);
+// The loaded scene as one plain line (the value, then its lines), for lists of past replies.
+void scene_summary(char *dst, size_t n);
 const char *scene_kind_name(card_kind_t k);
 
 // UTF-8 to the ASCII the built-in fonts cover: common punctuation is mapped, the rest dropped.
