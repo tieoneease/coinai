@@ -339,10 +339,23 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - **D20 (2026-10-16) One lock serializes everything sent to the panel, and a stalled UI restarts the coin.**
   - *Why:* the screen froze for good while the coin kept recording. A core dump showed the LVGL task waiting forever in `spi_device_acquire_bus` inside a flush. ESP-IDF's SPI master is not thread-safe for one device used from several tasks: brightness changes from the control loop or the BLE worker raced LVGL's flushes, and the losing task was never woken. Reproduced with `bright 80 5000` during `ui bench` (froze within 5,000 writes); with the lock, 120,000 writes in 3 runs and no freeze.
   - *How:* `display.c` takes one mutex around its own commands and around the panel's `draw_bitmap`, which it wraps, because LVGL's flushes go through it. The control loop restarts the coin through `esp_system_abort` (core dump to flash) when the UI tick is 6 s old and nothing is recording.
-- **D21 (2026-10-16, experiment) The coin shows a reply as one whole card with slots to fill.** A fast model (the composer) answers in JSON: a spoken line, an eye mood and one card from a fixed catalog (answer, stat, list, steps, timer, confirm, later). The coin lays the card out with its own fonts on the round screen. Work and results are in `experiments/genui/`, on branch `genui-exp1`.
+- **D21 (2026-10-16, experiment) The coin shows a reply as one whole card with slots to fill.** A fast model (the composer) answers in JSON: a spoken line, an eye mood and one card from a fixed catalog (answer, stat, list, steps, timer, confirm, later). The coin lays the card out with its own fonts on the round screen. Work and results are in `experiments/genui/`. D22 turns it into the product.
   - *Why:* fixed cards keep the coin fast and legible, and the model only fills text. The firmware is the validator: it reports any slot that doesn't fit, any field the kind doesn't have and any character it can't draw, so the composer can be checked, and later repaired, against the real layout instead of a copy of the font metrics.
   - *v0 boundary:* the composer has no tools. It answers from general knowledge, runs the coin's own timer, and hands anything live, personal or actionable to SamBot as a `later` card.
   - *Rejected:* free-form layout from the model (unbounded layouts can't be checked on a 466 px circle), and a text terminal that only shows SamBot's reply.
+- **D22 (2026-10-18) Scenes are the coin's answer: a SamBot route composes, the coin draws, SamBot's agent takes the hand-offs.** You chose this after SamBot took 91 s on a spoken request, past the coin's 45 s reply window (android/README.md).
+  - *How:* `POST /coin/scene` on SamBot turns the transcript into a scene with qwen3.8-27b. It checks the scene and asks once more when it fails. A `later` card comes back with a `handoff`, which the client sends to SamBot's agent with the existing `POST /prompt`. The coin shows the card about a second after the transcript and does not wait for SamBot's answer, which reaches the phone. The wire contract is PROTOCOL.md, "Scenes".
+  - *Why on SamBot:* the model gateway is reachable only from that VM (its credentials are injected at exe.dev's edge), and the app and the coin's Wi-Fi path both need the same composer. This revises D13 (no server change). The route has no side effects, so a client may retry it; only the hand-off is a prompt, and it keeps the at-most-once rule.
+  - *v1 boundary:*
+    - no `confirm` (the choice has no way back yet);
+    - `say` is not spoken;
+    - answers the composer gives itself are not in SamBot's conversation;
+    - a running timer survives Standby by a timed wake.
+  - *Fallback:* if the route fails, the client prompts SamBot directly as before (rule 7's reply window).
+  - *Rejected:*
+    - a longer reply window (screen-on time on every slow answer);
+    - the composer in the app (no model access from the phone, and the coin's Wi-Fi path would need its own);
+    - letting the route prompt SamBot itself (a retried compose would prompt twice).
 - **D17 The device measures speech per clip (`voiced_ms` in `CLIP_ENDED`), and the app does not prompt SamBot below a threshold.** SamBot's transcriber turned a silent clip into "Thank you."
   - *Rejected:* app-side detection. It would need Opus decoding on the phone, or Whisper's `no_speech_prob`, which SamBot's `/voice/transcribe` does not return.
 

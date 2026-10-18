@@ -128,6 +128,33 @@
       "hex": "81090057030200302e312e30"
     },
     {
+      "direction": "app_to_device",
+      "type": "SCENE",
+      "type_code": 8,
+      "fields": {
+        "clip": 7,
+        "part": 0,
+        "parts": 1,
+        "json": "{\"say\":\"Nine. Easy one.\",\"mood\":\"happy\",\"card\":{\"kind\":\"stat\",\"value\":\"9\",\"label\":\"20% of 45\"}}"
+      },
+      "hex": "086300070000017b22736179223a224e696e652e2045617379206f6e652e222c226d6f6f64223a226861707079222c2263617264223a7b226b696e64223a2273746174222c2276616c7565223a2239222c226c6162656c223a22323025206f66203435227d7d"
+    },
+    {
+      "direction": "device_to_app",
+      "type": "STATUS",
+      "type_code": 129,
+      "fields": {
+        "battery_pct": 64,
+        "charging": 0,
+        "usb_power": 0,
+        "recording": 0,
+        "scenes": 1,
+        "pending": 1,
+        "fw_version": "0.2.0"
+      },
+      "hex": "81090040080100302e322e30"
+    },
+    {
       "direction": "device_to_app",
       "type": "STATUS",
       "type_code": 129,
@@ -203,6 +230,16 @@
         "clip": 9
       },
       "hex": "85040003010900"
+    }
+  ],
+  "scene_split": [
+    {
+      "clip": 9,
+      "json": "{\"say\":\"Here's how, one step at a time.\",\"mood\":\"focus\",\"card\":{\"kind\":\"steps\",\"title\":\"Reset the router\",\"steps\":[\"Unplug the router and the modem from the wall, and wait thirty seconds.\",\"Plug the modem back in first and wait until its lights stop blinking.\",\"Plug the router back in and give it two minutes to start up again.\",\"Reconnect your phone to the network, then try loading a page.\",\"If it still fails, hold the reset pin for ten seconds and set it up again.\"]}}",
+      "hex": [
+        "08f100090000027b22736179223a2248657265277320686f772c206f6e65207374657020617420612074696d652e222c226d6f6f64223a22666f637573222c2263617264223a7b226b696e64223a227374657073222c227469746c65223a2252657365742074686520726f75746572222c227374657073223a5b22556e706c75672074686520726f7574657220616e6420746865206d6f64656d2066726f6d207468652077616c6c2c20616e64207761697420746869727479207365636f6e64732e222c22506c756720746865206d6f64656d206261636b20696e20666972737420616e64207761697420756e74696c20697473",
+        "08f00009000102206c69676874732073746f7020626c696e6b696e672e222c22506c75672074686520726f75746572206261636b20696e20616e6420676976652069742074776f206d696e7574657320746f20737461727420757020616761696e2e222c225265636f6e6e65637420796f75722070686f6e6520746f20746865206e6574776f726b2c207468656e20747279206c6f6164696e67206120706167652e222c224966206974207374696c6c206661696c732c20686f6c64207468652072657365742070696e20666f722074656e207365636f6e647320616e642073657420697420757020616761696e2e225d7d7d"
+      ]
     }
   ],
   "data": [

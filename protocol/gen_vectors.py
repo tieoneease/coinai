@@ -12,7 +12,7 @@ CTRL_UUID = "c0a10001-f569-41ae-8676-7f5a60d835fc"
 DATA_UUID = "c0a10002-f569-41ae-8676-7f5a60d835fc"
 
 TYPES = {
-    "HELLO": 0x01, "LIST": 0x02, "GET": 0x03, "ACK": 0x04, "WIFI_SET": 0x05, "CFG_SET": 0x06, "REPLY": 0x07,
+    "HELLO": 0x01, "LIST": 0x02, "GET": 0x03, "ACK": 0x04, "WIFI_SET": 0x05, "CFG_SET": 0x06, "REPLY": 0x07, "SCENE": 0x08,
     "STATUS": 0x81, "CLIP_STARTED": 0x82, "CLIP_ENDED": 0x83, "LIST_RESULT": 0x84, "ERROR": 0x85,
 }
 CFG_KEYS = {"reply_wait_s": (0x01, "<H"), "brightness": (0x02, "<B"), "idle_timeout_s": (0x03, "<H"), "off_after_h": (0x04, "<H"),
@@ -45,8 +45,12 @@ def encode(name, f):
         text = f["text"].encode()
         assert len(text) <= 200
         v = struct.pack("<HB", f["clip"], REPLY_STATES[f["state"]]) + text
+    elif name == "SCENE":
+        piece = f["json"].encode()
+        assert len(piece) <= SCENE_PART and 0 <= f["part"] < f["parts"] <= 8
+        v = struct.pack("<HBB", f["clip"], f["part"], f["parts"]) + piece
     elif name == "STATUS":
-        flags = (f["charging"] << 0) | (f["usb_power"] << 1) | (f["recording"] << 2)
+        flags = (f["charging"] << 0) | (f["usb_power"] << 1) | (f["recording"] << 2) | (f.get("scenes", 0) << 3)
         v = struct.pack("<BBH", f["battery_pct"], flags, f["pending"]) + f["fw_version"].encode()
     elif name == "CLIP_STARTED":
         v = struct.pack("<HBIQ", f["clip"], f["codec"], f["sample_rate"], f["start_utc_ms"])
@@ -62,11 +66,29 @@ def encode(name, f):
     return tlv(name, v)
 
 
+SCENE_PART = 237  # 244 - 3 (TLV header) - 4 (clip, part, parts)
+
+
+def scene_parts(clip, scene: str) -> list:
+    """A scene's SCENE messages: the UTF-8 JSON cut into pieces of SCENE_PART bytes, in order."""
+    raw = scene.encode()
+    pieces = [raw[i:i + SCENE_PART] for i in range(0, len(raw), SCENE_PART)] or [b""]
+    assert len(pieces) <= 8
+    return [tlv("SCENE", struct.pack("<HBB", clip, i, len(pieces)) + p) for i, p in enumerate(pieces)]
+
+
 def data_packet(clip, offset, payload: bytes) -> bytes:
     assert len(payload) <= 238
     return struct.pack("<HI", clip, offset) + payload
 
 
+SHORT_SCENE = '{"say":"Nine. Easy one.","mood":"happy","card":{"kind":"stat","value":"9","label":"20% of 45"}}'
+LONG_SCENE = json.dumps({"say": "Here's how, one step at a time.", "mood": "focus", "card": {"kind": "steps", "title": "Reset the router", "steps": [
+    "Unplug the router and the modem from the wall, and wait thirty seconds.",
+    "Plug the modem back in first and wait until its lights stop blinking.",
+    "Plug the router back in and give it two minutes to start up again.",
+    "Reconnect your phone to the network, then try loading a page.",
+    "If it still fails, hold the reset pin for ten seconds and set it up again."]}}, separators=(",", ":"))
 T = 1760000000000  # 2025-10-09T08:53:20Z in ms
 CASES = [
     ("app_to_device", "HELLO", {"version": 1, "phone_utc_ms": T}),
@@ -81,6 +103,8 @@ CASES = [
     ("app_to_device", "REPLY", {"clip": 7, "state": "thinking", "text": ""}),
     ("app_to_device", "REPLY", {"clip": 7, "state": "done", "text": "Got it \u2014 added to your list."}),
     ("device_to_app", "STATUS", {"battery_pct": 87, "charging": 1, "usb_power": 1, "recording": 0, "pending": 2, "fw_version": "0.1.0"}),
+    ("app_to_device", "SCENE", {"clip": 7, "part": 0, "parts": 1, "json": SHORT_SCENE}),
+    ("device_to_app", "STATUS", {"battery_pct": 64, "charging": 0, "usb_power": 0, "recording": 0, "scenes": 1, "pending": 1, "fw_version": "0.2.0"}),
     ("device_to_app", "STATUS", {"battery_pct": 255, "charging": 0, "usb_power": 0, "recording": 1, "pending": 0, "fw_version": "0.1.0"}),
     ("device_to_app", "CLIP_STARTED", {"clip": 7, "codec": 1, "sample_rate": 16000, "start_utc_ms": T}),
     ("device_to_app", "CLIP_ENDED", {"clip": 7, "size": 18234, "duration_ms": 6020, "crc32": 0x1234ABCD, "voiced_ms": 4180, "start_utc_ms": 1791590400123}),
@@ -99,6 +123,7 @@ def main():
         "ctrl_uuid": CTRL_UUID,
         "data_uuid": DATA_UUID,
         "ctrl": [{"direction": d, "type": n, "type_code": TYPES[n], "fields": f, "hex": encode(n, f).hex()} for d, n, f in CASES],
+        "scene_split": [{"clip": 9, "json": LONG_SCENE, "hex": [m.hex() for m in scene_parts(9, LONG_SCENE)]}],
         "data": [{"clip": 7, "offset": 238, "payload_hex": bytes(range(10)).hex(), "hex": data_packet(7, 238, bytes(range(10))).hex()}],
     }
     path = pathlib.Path(__file__).parent / "vectors" / "v1.json"

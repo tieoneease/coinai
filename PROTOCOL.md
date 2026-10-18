@@ -50,7 +50,8 @@ The intervals follow Apple's Accessory Design Guidelines §58.5. They are harmle
 | app → device | `WIFI_SET` | SSID, password |
 | app → device | `CFG_SET` | key, value |
 | app → device | `REPLY` | clip id, state (`transcribing`, `thinking`, `done`, `failed`), text: UTF-8 plain text of at most 200 bytes, cut at a character boundary |
-| device → app | `STATUS` | battery %, charging, pending clip count, recording flag, firmware version |
+| app → device | `SCENE` | clip id, part, parts, a piece of the scene JSON (see "Scenes") |
+| device → app | `STATUS` | battery %, charging, pending clip count, recording flag, shows-scenes flag, firmware version |
 | device → app | `CLIP_STARTED` | clip id, codec (`ogg-opus`), sample rate, estimated start UTC ms |
 | device → app | `CLIP_ENDED` | clip id, size in bytes, duration ms, CRC-32, voiced ms, start UTC ms |
 | device → app | `LIST_RESULT` | clip ids, sizes, complete/in-progress flags |
@@ -72,7 +73,8 @@ All integers are little-endian. Strings are UTF-8 with no terminator, and a stri
 | `0x05` | `WIFI_SET` | `ssid_len u8`, `ssid` (1–32 bytes), `pass_len u8`, `password` (0 bytes for an open network, else 8–64). Adds the network to the coin's list of up to 4 for Wi-Fi delivery (the newest first, the oldest dropped; the same SSID again replaces its password). Invalid → `ERROR` code 5 |
 | `0x06` | `CFG_SET` | `key u8`, then the value: `0x01` reply_wait_s `u16` (0–600, default 45), `0x02` brightness `u8` (percent, 1–100, default 100), `0x03` idle_timeout_s `u16` (5–3600, default 30), `0x04` off_after_h `u16` (0–720, 0 = never, default 0), `0x05` utc_offset_min `i16` (local time minus UTC in minutes, −720 to 840; unset until sent, and the coin shows no clock until then), `0x06` delivery `u16` (0 Wi-Fi first, 1 phone first, 2 phone only; default 0; see "Wi-Fi delivery"). Stored on the device; out of range → `ERROR` code 5 |
 | `0x07` | `REPLY` | `clip u16`, `state u8` (0 transcribing, 1 thinking, 2 done, 3 failed), `text` (\≤ 200 bytes) |
-| `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording), `pending u16`, `fw_version` (\≤ 32 bytes) |
+| `0x08` | `SCENE` | `clip u16`, `part u8` (0-based), `parts u8` (1–8), `json` (\≤ 237 bytes): one piece of a scene, in order. See "Scenes" |
+| `0x81` | `STATUS` | `battery_pct u8` (255 = unknown), `flags u8` (bit 0 charging, bit 1 USB power, bit 2 recording, bit 3 shows scenes), `pending u16`, `fw_version` (\≤ 32 bytes) |
 | `0x82` | `CLIP_STARTED` | `clip u16`, `codec u8` (1 = Ogg Opus), `sample_rate u32`, `start_utc_ms u64` (0 = unknown) |
 | `0x83` | `CLIP_ENDED` | `clip u16`, `size u32`, `duration_ms u32`, `crc32 u32`, `voiced_ms u32` (time with speech-level audio; the app does not prompt SamBot for a clip below its threshold; `0xFFFFFFFF` = unknown, for a clip recovered after power loss), `start_utc_ms u64` (0 = unknown) |
 | `0x84` | `LIST_RESULT` | `flags u8` (bit 0 = more messages follow), then entries of `clip u16`, `size u32`, `flags u8` (bit 0 complete), up to 34 per message |
@@ -107,7 +109,60 @@ Device Information (0x180A) and Battery (0x180F, with level notifications).
    - When the window closes, the device goes to Standby. A reply that arrives later is only on the phone.
    - The app removes markdown, and any characters the coin's font lacks, before sending. The font covers printable ASCII (0x20–0x7E) and newline. The coin itself maps ‘ ’ ′ to `'`, “ ” ″ to `"`, … to `...`, – — − • · to `-`, no-break and thin spaces to a space, ° to ` deg` and × to `x`, and drops anything else.
    - In state `thinking` the text may carry what SamBot heard (the transcript); the coin shows it while it waits.
+   - A `SCENE` ends the window like a `done` (see "Scenes").
 8. **Local time.** The coin shows a clock only after the app has sent `utc_offset_min` (`CFG_SET` key `0x05`). The app sends it after `HELLO` and whenever the phone's time zone changes.
+
+## Scenes
+
+A scene is the coin's answer as one card from a fixed catalog, drawn by the coin itself (PLAN.md D21, D22). A fast model fills it in a second or less. Anything it cannot do itself goes to SamBot as a hand-off, whose answer reaches the phone instead of the coin.
+
+**Format** (catalog `coin/1`): one JSON object.
+
+```json
+{"say": "Nine. Easy one.", "mood": "happy", "card": {"kind": "stat", "value": "9", "label": "20% of 45"}}
+```
+
+- `say`: up to 160 characters. The coin keeps it but does not speak it yet.
+- `mood`: one of `neutral`, `happy`, `joy`, `content`, `focus`, `think`, `sad`, `worried`, `confused`, `surprised`, `curious`, `sleepy`, `tired`.
+- `card`: one of the kinds below. Limits are in characters, ASCII only.
+
+| Kind | Fields | On the coin |
+|---|---|---|
+| `answer` | `title` ≤ 36, `body` ≤ 100 (optional) | text |
+| `stat` | `value` ≤ 8, `unit` ≤ 4 (optional), `label` ≤ 40, `sub` ≤ 44 (optional) | one big number |
+| `list` | `title` ≤ 22, `items`: 1–5 of ≤ 18 | tap an item to tick it |
+| `steps` | `title` ≤ 26, `steps`: 2–6 of ≤ 80 | one step per page, tap for the next |
+| `timer` | `label` ≤ 22, `seconds` 1–86400 | counts down, tap to pause; it keeps running through Standby and the coin wakes when it ends |
+| `later` | `text` ≤ 40 | the task, with "SamBot is on it" under it |
+| `confirm` | `question` ≤ 60, `yes`, `no` ≤ 9 | reserved: drawn, but the choice cannot go back yet, so composers do not send it |
+
+The coin is the final check. Text that does not fit its line is cut with "...". It drops characters its fonts lack, after folding the same ones as for `REPLY`. An unknown field or mood is ignored. A scene it cannot show at all (not JSON, no card, an unknown kind or a missing required field) gets `ERROR` code 5 for the clip.
+
+**Over BLE** (`SCENE`, `0x08`): the app sends a scene only to a coin whose `STATUS` has bit 3 set. Otherwise it sends `REPLY` as before.
+- The JSON is split into 1–8 parts of at most 237 bytes, sent in order.
+- Part 0 starts a new scene. A part that does not continue the one being received (another clip, a gap, a different `parts`) drops it, with `ERROR` code 5.
+- After the last part the coin shows the card. That ends the clip's reply window like a `REPLY` `done`, and the normal idle timeout follows. An accepted `SCENE` gets no answer.
+
+**The composer** is a SamBot route, `POST /coin/scene`, reached like the other routes (through the proxy, with the token):
+
+```
+request   {"text": "<what the owner said>", "at_ms": <recording start, UTC ms; optional>, "utc_offset_min": <optional>}
+response  200 {"scene": {...}, "handoff": "<text for SamBot>" | null, "issues": ["..."]}
+          400 no text; 503 no model gateway on the host
+```
+
+- `handoff` is set exactly when the card is `later`: the owner's words, for `POST /prompt`.
+- When the model fails or answers twice with an unusable scene, the route still answers 200. It returns a `later` scene whose `handoff` is the text, and says why in `issues`.
+- `at_ms` and `utc_offset_min` give the model the local time the owner spoke at, for "tomorrow" or "in an hour".
+
+**The client** (the app, or the coin over Wi-Fi):
+1. Transcribe as before. While composing, show `transcribing`, then `thinking` with the transcript.
+2. `POST /coin/scene`, with a short timeout.
+3. Show the scene.
+4. If `handoff` is set, `POST /prompt` with it, at most once. Nobody waits for that answer on the coin: it reaches the phone (the app's notification) and SamBot's web client.
+5. If the route cannot be reached or answers anything but 200, fall back to the earlier flow: `POST /prompt` with the transcript and wait for the reply in the reply window.
+
+A scene answered by the composer alone (not `later`) is not in SamBot's conversation. The app keeps it with the clip.
 
 ## Wi-Fi delivery
 
