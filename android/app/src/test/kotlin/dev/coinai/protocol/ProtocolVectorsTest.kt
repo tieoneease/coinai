@@ -41,7 +41,7 @@ class ProtocolVectorsTest {
     fun vectorsCoverEveryMessageType() {
         val known = setOf(
             MessageType.HELLO, MessageType.LIST, MessageType.GET, MessageType.ACK, MessageType.WIFI_SET,
-            MessageType.CFG_SET, MessageType.REPLY, MessageType.STATUS, MessageType.CLIP_STARTED,
+            MessageType.CFG_SET, MessageType.REPLY, MessageType.SCENE, MessageType.STATUS, MessageType.CLIP_STARTED,
             MessageType.CLIP_ENDED, MessageType.LIST_RESULT, MessageType.ERROR,
         )
         assertEquals(known, typeCodes.values.toSet())
@@ -79,6 +79,22 @@ class ProtocolVectorsTest {
         }
     }
 
+    @Test
+    fun sceneSplitVectors() {
+        val splits = root.getValue("scene_split").jsonArray.map { it.jsonObject }
+        assertTrue(splits.isNotEmpty())
+        for (v in splits) {
+            val expected = v.getValue("hex").jsonArray.map { it.jsonPrimitive.content }
+            val parts = CtrlMessage.Scene.split(v.int("clip"), v.str("json"))
+            assertEquals("split of ${v.str("json").take(40)}", expected, parts.map { it.encode().toHex() })
+            // The coin joins the pieces back into the same bytes.
+            val joined = expected.map { CtrlMessage.decode(it.hexToBytes()) as CtrlMessage.Scene }
+            assertEquals(v.str("json"), String(joined.fold(ByteArray(0)) { acc, p -> acc + p.json }, Charsets.UTF_8))
+            assertTrue(joined.all { it.parts == expected.size && it.clip == v.int("clip") })
+            assertEquals(expected.indices.toList(), joined.map { it.part })
+        }
+    }
+
     private fun fromFields(type: String, f: JsonObject): CtrlMessage = when (type) {
         "HELLO" -> CtrlMessage.Hello(phoneUtcMs = f.long("phone_utc_ms"), version = f.int("version"))
         "LIST" -> CtrlMessage.ListClips
@@ -87,6 +103,7 @@ class ProtocolVectorsTest {
         "WIFI_SET" -> CtrlMessage.WifiSet(f.str("ssid"), f.str("password"))
         "CFG_SET" -> CtrlMessage.CfgSet(CfgKey.valueOf(f.str("key").uppercase()), f.int("value"))
         "REPLY" -> CtrlMessage.Reply(f.int("clip"), ReplyState.valueOf(f.str("state").uppercase()), f.str("text"))
+        "SCENE" -> CtrlMessage.Scene(f.int("clip"), f.int("part"), f.int("parts"), f.str("json").toByteArray(Charsets.UTF_8))
         "STATUS" -> CtrlMessage.Status(
             batteryPct = f.int("battery_pct"),
             charging = f.int("charging") == 1,
@@ -94,6 +111,7 @@ class ProtocolVectorsTest {
             recording = f.int("recording") == 1,
             pending = f.int("pending"),
             fwVersion = f.str("fw_version"),
+            scenes = f["scenes"]?.jsonPrimitive?.int == 1,
         )
         "CLIP_STARTED" -> CtrlMessage.ClipStarted(f.int("clip"), f.int("codec"), f.long("sample_rate"), f.long("start_utc_ms"))
         "CLIP_ENDED" -> CtrlMessage.ClipEnded(f.int("clip"), f.long("size"), f.long("duration_ms"), f.long("crc32"), f.long("voiced_ms"), f.long("start_utc_ms"))
@@ -116,11 +134,16 @@ class ProtocolVectorsTest {
         is CtrlMessage.WifiSet -> buildJsonObject { put("ssid", m.ssid); put("password", m.password) }
         is CtrlMessage.CfgSet -> buildJsonObject { put("key", m.key.name.lowercase()); put("value", m.value) }
         is CtrlMessage.Reply -> buildJsonObject { put("clip", m.clip); put("state", m.state.name.lowercase()); put("text", m.text) }
+        is CtrlMessage.Scene -> buildJsonObject {
+            put("clip", m.clip); put("part", m.part); put("parts", m.parts); put("json", String(m.json, Charsets.UTF_8))
+        }
         is CtrlMessage.Status -> buildJsonObject {
             put("battery_pct", m.batteryPct)
             put("charging", if (m.charging) 1 else 0)
             put("usb_power", if (m.usbPower) 1 else 0)
             put("recording", if (m.recording) 1 else 0)
+            // Vectors from before scenes leave the flag out.
+            if (m.scenes) put("scenes", 1)
             put("pending", m.pending)
             put("fw_version", m.fwVersion)
         }

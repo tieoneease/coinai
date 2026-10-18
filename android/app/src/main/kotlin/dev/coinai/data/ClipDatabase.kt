@@ -11,6 +11,8 @@ import androidx.room3.PrimaryKey
 import androidx.room3.Query
 import androidx.room3.Room
 import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import androidx.sqlite.driver.AndroidSQLiteDriver
 import dev.coinai.clips.ClipRecord
 import dev.coinai.clips.ClipState
@@ -37,10 +39,13 @@ data class ClipEntity(
     val error: String? = null,
     @ColumnInfo(defaultValue = "0") val forceSpeech: Boolean = false,
     val createdAtMs: Long,
+    /** Since version 2: the composer's scene and a `later` scene's hand-off text. */
+    val scene: String? = null,
+    val handoff: String? = null,
 ) {
     fun toRecord() = ClipRecord(
         id, device, clipId, state, size, crc32, durationMs, voicedMs, receivedBytes, startedAtMs, receivedAtMs,
-        ackedAtMs, filePath, transcript, reply, replyPartial, error, forceSpeech, createdAtMs,
+        ackedAtMs, filePath, transcript, reply, replyPartial, scene, handoff, error, forceSpeech, createdAtMs,
     )
 }
 
@@ -98,18 +103,34 @@ interface ClipDao {
     @Query("UPDATE clips SET state = 'REPLIED', reply = :reply, replyPartial = :partial, error = NULL WHERE id = :id AND state = 'PROMPTED'")
     suspend fun saveReply(id: Long, reply: String, partial: Boolean): Int
 
+    @Query(
+        """UPDATE clips SET state = 'REPLIED', scene = :scene, reply = :summary, replyPartial = 0, error = NULL
+           WHERE id = :id AND state = 'TRANSCRIBED'""",
+    )
+    suspend fun saveSceneReply(id: Long, scene: String, summary: String): Int
+
+    @Query("UPDATE clips SET scene = :scene, handoff = :handoff WHERE id = :id AND state = 'TRANSCRIBED'")
+    suspend fun saveHandoff(id: Long, scene: String, handoff: String): Int
+
     @Query("UPDATE clips SET state = :to, forceSpeech = :forceSpeech, error = NULL WHERE id = :id")
     suspend fun resetForResend(id: Long, to: ClipState, forceSpeech: Boolean)
 }
 
-@Database(entities = [ClipEntity::class], version = 1, exportSchema = false)
+@Database(entities = [ClipEntity::class], version = 2, exportSchema = false)
 abstract class ClipDatabase : RoomDatabase() {
     abstract fun clips(): ClipDao
 
     companion object {
+        /** Version 2 (scenes v1): nullable `scene` and `handoff` columns; existing rows get NULL. */
+        val MIGRATION_1_2 = Migration(1, 2) { connection ->
+            connection.execSQL("ALTER TABLE clips ADD COLUMN scene TEXT")
+            connection.execSQL("ALTER TABLE clips ADD COLUMN handoff TEXT")
+        }
+
         fun open(context: Context): ClipDatabase =
             Room.databaseBuilder(context.applicationContext, ClipDatabase::class.java, "clips.db")
                 .setDriver(AndroidSQLiteDriver())
+                .addMigrations(MIGRATION_1_2)
                 .build()
     }
 }

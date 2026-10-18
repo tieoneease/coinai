@@ -576,6 +576,7 @@ class SyncEngine(
         MessageType.ACK -> "ACK"
         MessageType.CFG_SET -> "CFG_SET"
         MessageType.REPLY -> "REPLY"
+        MessageType.SCENE -> "SCENE"
         MessageType.WIFI_SET -> "WIFI_SET"
         else -> "0x%02x".format(type)
     }

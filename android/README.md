@@ -6,10 +6,10 @@ Kotlin + Jetpack Compose app that receives clips from the coin over BLE and forw
 
 | Package | Android? | What |
 |---|---|---|
-| `dev.coinai.protocol` | no | Codec for PROTOCOL.md v1 (every `ctrl` TLV message, `data` packets). Unknown TLV types decode to `CtrlMessage.Unknown`. |
-| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `CFG_SET utc_offset_min` and `delivery`, queued `WIFI_SET`s, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`; a clip the coin discards mid-stream is dropped; a clip the coin is sending over Wi-Fi (`ERROR` 4) is skipped until it is offered back with `CLIP_STARTED`), `CoinClock` (rule 8: the phone's UTC offset), `CoinSettings` (delivery order, `WIFI_SET` limits in UTF-8 bytes), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY`, the transcript while `thinking`, while the coin waits). |
-| `dev.coinai.clips` | no | `ClipProcessor` (transcribe, voiced/blank gate, at-most-once prompt, reply), clip states, `PlainText` (markdown removal; folding to the coin's character set, printable ASCII and newline, with the coin's own mappings). |
-| `dev.coinai.sambot` | no | `SambotClient` (`health`, `transcribe`, `ask`) after SamBot's reference client. |
+| `dev.coinai.protocol` | no | Codec for PROTOCOL.md v1 (every `ctrl` TLV message, `data` packets); `Scene.split` cuts a scene's JSON into 1–8 `SCENE` parts of ≤ 237 bytes. Unknown TLV types decode to `CtrlMessage.Unknown`. |
+| `dev.coinai.sync` | no | `CoinLink` (the coin as a message link), `SyncEngine` (one session: `HELLO`/`STATUS`, `CFG_SET utc_offset_min` and `delivery`, queued `WIFI_SET`s, `LIST`, resumable `GET`, reassembly, size + CRC-32 check, durable commit, then `ACK`; a clip the coin discards mid-stream is dropped; a clip the coin is sending over Wi-Fi (`ERROR` 4) is skipped until it is offered back with `CLIP_STARTED`), `CoinClock` (rule 8: the phone's UTC offset), `CoinSettings` (delivery order, `WIFI_SET` limits in UTF-8 bytes), `ClipStore`, `ReplyWindow` (rule 7: forward `REPLY`, the transcript while `thinking`, while the coin waits; a scene as its `SCENE` parts, or its summary as `REPLY` `done` when the coin refuses it with `ERROR` 5 or lacks `STATUS` bit 3). |
+| `dev.coinai.clips` | no | `ClipProcessor` (transcribe, voiced/blank gate, scene or hand-off, at-most-once prompt, reply), clip states, `SceneSummary` (a card as plain text), `PlainText` (markdown removal; folding to the coin's character set, printable ASCII and newline, with the coin's own mappings). |
+| `dev.coinai.sambot` | no | `SambotClient` (`health`, `transcribe`, `ask`, `scene` with an 8 s call timeout) after SamBot's reference client. |
 | `dev.coinai.data` | yes | Room 3 clip table, `ClipRepository` (implements `ClipStore` and `ProcessingStore`; audio in `filesDir/clips/<device>/`). |
 | `dev.coinai.settings` | yes | DataStore settings; the SamBot token as AES-256-GCM ciphertext + IV, key in the Android Keystore (`KeystoreSecretBox`). A plain token from the first version is encrypted on first read. The coin's Wi-Fi networks (passwords sealed the same way, own key) with their state per coin, and the delivery order. |
 | `dev.coinai.ble` | yes | `CoinBleManager` (Nordic Android-BLE-Library), CDM pairing and presence (`CoinPairing`, `CoinPresenceService`), `SyncService` (connectedDevice FGS for one visit). |
@@ -17,7 +17,12 @@ Kotlin + Jetpack Compose app that receives clips from the coin over BLE and forw
 
 Clip states: `RECEIVING → RECEIVED → TRANSCRIBED → PROMPTED → REPLIED`, side exits `NO_SPEECH`, `UNCERTAIN`, `FAILED`. A clip is prompted at most once: `TRANSCRIBED → PROMPTED` commits before `POST /prompt`, and a prompt whose outcome is unknown becomes `UNCERTAIN` and is only sent again by the user ("Resend").
 
-Open protocol questions are marked `// PROTOCOL-Q:` in the code; there are none at present.
+Scenes (PROTOCOL.md "Scenes", PLAN.md D22), for a coin whose last `STATUS` has bit 3 set: after the transcript the coin gets `thinking` with it, and the app calls `POST /coin/scene` (at_ms = the clip's start, utc_offset_min = the phone's offset then). The scene goes to the coin in place of the final `REPLY` and is kept with the clip (Room version 2: `scene`, `handoff`).
+- No `handoff`: the clip is `REPLIED` with the card's summary as its reply; no prompt, no notification. The row says "Answered on the coin".
+- A `handoff` (a `later` card): it is kept on the `TRANSCRIBED` clip and prompted instead of the transcript, claimed at most once as above. Nothing more goes to the coin. The row says "Handed to SamBot" until SamBot's reply arrives (notification as usual); a hand-off that ends `FAILED` or `UNCERTAIN` posts a notification instead of a coin line. A retry reuses the kept scene: the route is not called again.
+- The route fails (network, 8 s timeout, non-200, malformed body): logged, and the clip takes the plain way (prompt the transcript, `REPLY`).
+
+Open protocol questions are marked `// PROTOCOL-Q:` in the code. One: the protocol gives no time bound for the `ERROR` 5 that refuses a `SCENE`, so `ReplyWindow` waits 2 s after the last part (also past the last clip's answer) before taking silence as accepted.
 
 Settings on the main screen: SamBot, **Delivery** (Wi-Fi first, the default / phone first / phone only; `CFG_SET` key `0x06` after `HELLO` in every session and at once when changed during a visit), **Coin Wi-Fi** (add a network or an open one, list, remove from the app's list; a new network waits for the next session, goes out with `WIFI_SET` after `STATUS`, and shows as sent or refused; the coin keeps the 4 newest and cannot forget one over BLE), Processing.
 
@@ -49,7 +54,8 @@ The emulator's Bluetooth controller never reports the advertiser tracking that C
 - whether a real presence report also starts a force-stopped app;
 - ColorOS's battery manager;
 - a SamBot answer inside the reply window, shown on the coin (the coin's own Wi-Fi path has done this);
-- OTA.
+- OTA;
+- scenes (`SCENE`, `/coin/scene`, hand-offs): unit-tested against `FakeCoin` and MockWebServer only.
 
 `KeystoreSecretBox` needs a real Keystore; its tests use the same AES-GCM with an in-memory key.
 

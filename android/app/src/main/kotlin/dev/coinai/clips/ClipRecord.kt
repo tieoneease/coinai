@@ -33,6 +33,10 @@ data class ClipRecord(
     val transcript: String? = null,
     val reply: String? = null,
     val replyPartial: Boolean = false,
+    /** The composer's scene (PROTOCOL.md "Scenes"), compact JSON, when the coin was answered with one. */
+    val scene: String? = null,
+    /** The text prompted to SamBot for a `later` scene, instead of the transcript. */
+    val handoff: String? = null,
     val error: String? = null,
     /** Set by a manual resend of a NO_SPEECH clip: skip the voiced-time gate once. */
     val forceSpeech: Boolean = false,
@@ -56,6 +60,18 @@ interface ProcessingStore {
     suspend fun releasePrompt(id: Long)
 
     suspend fun saveReply(id: Long, reply: String, partial: Boolean)
+
+    /**
+     * TRANSCRIBED → REPLIED for a scene the composer answered alone: the scene, and its summary as
+     * the reply. False when the clip was not TRANSCRIBED.
+     */
+    suspend fun saveSceneReply(id: Long, scene: String, summary: String): Boolean
+
+    /**
+     * Keeps a `later` scene and its hand-off text on a TRANSCRIBED clip, which stays TRANSCRIBED
+     * until the hand-off is claimed like any prompt. False when the clip was not TRANSCRIBED.
+     */
+    suspend fun saveHandoff(id: Long, scene: String, handoff: String): Boolean
 
     suspend fun setState(id: Long, state: ClipState, error: String? = null)
 

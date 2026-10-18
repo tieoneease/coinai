@@ -91,6 +91,20 @@ class MemoryClips(private val root: File) : ClipStore, ProcessingStore {
         if (r.state == ClipState.PROMPTED) rows[id] = r.copy(state = ClipState.REPLIED, reply = reply, replyPartial = partial, error = null)
     }
 
+    override suspend fun saveSceneReply(id: Long, scene: String, summary: String): Boolean = synchronized(this) {
+        val r = rows.getValue(id)
+        if (r.state != ClipState.TRANSCRIBED) return false
+        rows[id] = r.copy(state = ClipState.REPLIED, scene = scene, reply = summary, replyPartial = false, error = null)
+        true
+    }
+
+    override suspend fun saveHandoff(id: Long, scene: String, handoff: String): Boolean = synchronized(this) {
+        val r = rows.getValue(id)
+        if (r.state != ClipState.TRANSCRIBED) return false
+        rows[id] = r.copy(scene = scene, handoff = handoff)
+        true
+    }
+
     override suspend fun setState(id: Long, state: ClipState, error: String?) {
         rows[id] = rows.getValue(id).copy(state = state, error = error)
     }

@@ -143,6 +143,68 @@ class ClipRepositoryTest {
     }
 
     @Test
+    fun scenesAreSavedOnlyOnTranscribedClips() = runBlocking {
+        val local = received(1)
+        assertFalse("not transcribed yet", repo.saveSceneReply(local, "{}", "x"))
+        repo.saveTranscript(local, "what is 20% of 45")
+        assertTrue(repo.saveSceneReply(local, """{"card":{}}""", "9\n20% of 45"))
+        repo.get(local)!!.let {
+            assertEquals(ClipState.REPLIED, it.state)
+            assertEquals("""{"card":{}}""", it.scene)
+            assertEquals("9\n20% of 45", it.reply)
+            assertNull(it.handoff)
+        }
+        assertFalse("already replied", repo.saveSceneReply(local, "{}", "y"))
+
+        val later = received(2)
+        repo.saveTranscript(later, "remind me at 5")
+        assertTrue(repo.saveHandoff(later, """{"card":{"kind":"later"}}""", "remind me at 5"))
+        repo.get(later)!!.let {
+            assertEquals("stays transcribed until claimed", ClipState.TRANSCRIBED, it.state)
+            assertEquals("remind me at 5", it.handoff)
+        }
+        assertTrue(repo.claimPrompt(later))
+        repo.saveReply(later, "Set.", partial = false)
+        repo.get(later)!!.let {
+            assertEquals(ClipState.REPLIED, it.state)
+            assertEquals("Set.", it.reply)
+            assertEquals("""{"card":{"kind":"later"}}""", it.scene)
+        }
+    }
+
+    @Test
+    fun version1DatabaseMigratesKeepingItsClips() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = context.getDatabasePath("migrate.db").apply { parentFile!!.mkdirs(); delete() }
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(file, null).use { v1 ->
+            v1.execSQL(
+                "CREATE TABLE `clips` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `device` TEXT NOT NULL, " +
+                    "`clipId` INTEGER NOT NULL, `state` TEXT NOT NULL, `size` INTEGER, `crc32` INTEGER, `durationMs` INTEGER, " +
+                    "`voicedMs` INTEGER, `receivedBytes` INTEGER NOT NULL, `startedAtMs` INTEGER, `receivedAtMs` INTEGER, " +
+                    "`ackedAtMs` INTEGER, `filePath` TEXT, `transcript` TEXT, `reply` TEXT, " +
+                    "`replyPartial` INTEGER NOT NULL DEFAULT 0, `error` TEXT, `forceSpeech` INTEGER NOT NULL DEFAULT 0, " +
+                    "`createdAtMs` INTEGER NOT NULL)",
+            )
+            v1.execSQL("CREATE INDEX `index_clips_device_clipId` ON `clips` (`device`, `clipId`)")
+            v1.execSQL("INSERT INTO clips (device, clipId, state, receivedBytes, reply, createdAtMs) VALUES ('AA:BB', 7, 'REPLIED', 0, 'hi', 5)")
+            v1.version = 1
+        }
+        val migrated = Room.databaseBuilder(context, ClipDatabase::class.java, file.path)
+            .setDriver(AndroidSQLiteDriver())
+            .addMigrations(ClipDatabase.MIGRATION_1_2)
+            .build()
+        try {
+            val row = ClipRepository(migrated, tmp.newFolder("m")).get(1)!!
+            assertEquals(ClipState.REPLIED, row.state)
+            assertEquals("hi", row.reply)
+            assertNull(row.scene)
+            assertNull(row.handoff)
+        } finally {
+            migrated.close()
+        }
+    }
+
+    @Test
     fun pendingProcessingListsUnfinishedClips() = runBlocking {
         val a = received(1)
         val b = received(2)

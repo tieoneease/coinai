@@ -27,6 +27,9 @@ object Protocol {
     const val MAX_REPLY_TEXT_BYTES: Int = 200
     const val MAX_FW_VERSION_BYTES: Int = 32
     const val MAX_LIST_ENTRIES: Int = 34
+    /** `SCENE`: `clip u16, part u8, parts u8` leave 237 bytes of JSON per message. */
+    const val MAX_SCENE_PART_BYTES: Int = MAX_VALUE_SIZE - 4
+    const val MAX_SCENE_PARTS: Int = 8
 
     const val CODEC_OGG_OPUS: Int = 1
     const val BATTERY_UNKNOWN: Int = 255
@@ -43,6 +46,7 @@ object MessageType {
     const val WIFI_SET: Int = 0x05
     const val CFG_SET: Int = 0x06
     const val REPLY: Int = 0x07
+    const val SCENE: Int = 0x08
     const val STATUS: Int = 0x81
     const val CLIP_STARTED: Int = 0x82
     const val CLIP_ENDED: Int = 0x83
@@ -137,6 +141,39 @@ sealed class CtrlMessage {
         }
     }
 
+    /**
+     * One piece of a scene (PROTOCOL.md "Scenes"): [json] is raw bytes because parts are cut at
+     * byte boundaries, possibly inside a UTF-8 character. Build the parts with [split].
+     */
+    class Scene(val clip: Int, val part: Int, val parts: Int, json: ByteArray) : CtrlMessage() {
+        override val type: Int get() = MessageType.SCENE
+        private val bytes = json.copyOf()
+        val json: ByteArray get() = bytes.copyOf()
+
+        override fun equals(other: Any?): Boolean =
+            other is Scene && other.clip == clip && other.part == part && other.parts == parts && other.bytes.contentEquals(bytes)
+
+        override fun hashCode(): Int = ((31 * clip + part) * 31 + parts) * 31 + bytes.contentHashCode()
+        override fun toString(): String = "Scene(clip=$clip, part=$part/$parts, json=${bytes.size} bytes)"
+
+        companion object {
+            /**
+             * The `SCENE` messages for [json], in order: its UTF-8 bytes cut into pieces of
+             * [Protocol.MAX_SCENE_PART_BYTES], at most [Protocol.MAX_SCENE_PARTS]. Throws
+             * [IllegalArgumentException] for an empty or too long scene.
+             */
+            fun split(clip: Int, json: String): List<Scene> {
+                val all = json.toByteArray(Charsets.UTF_8)
+                require(all.isNotEmpty()) { "empty scene" }
+                val chunks = (all.indices step Protocol.MAX_SCENE_PART_BYTES).map { all.copyOfRange(it, minOf(all.size, it + Protocol.MAX_SCENE_PART_BYTES)) }
+                require(chunks.size <= Protocol.MAX_SCENE_PARTS) {
+                    "scene of ${all.size} bytes needs ${chunks.size} parts, max ${Protocol.MAX_SCENE_PARTS}"
+                }
+                return chunks.mapIndexed { i, chunk -> Scene(clip, i, chunks.size, chunk) }
+            }
+        }
+    }
+
     // device → app
 
     data class Status(
@@ -146,6 +183,8 @@ sealed class CtrlMessage {
         val recording: Boolean,
         val pending: Int,
         val fwVersion: String,
+        /** Flags bit 3: the coin draws scenes, so the app may send `SCENE` (PROTOCOL.md "Scenes"). */
+        val scenes: Boolean = false,
     ) : CtrlMessage() {
         override val type: Int get() = MessageType.STATUS
         val batteryKnown: Boolean get() = batteryPct != Protocol.BATTERY_UNKNOWN
@@ -196,9 +235,15 @@ sealed class CtrlMessage {
                 if (key.width == 1) v.u8(value) else v.u16(value and 0xFFFF)
             }
             is Reply -> { v.u16(clip); v.u8(state.code); v.restString(text, Protocol.MAX_REPLY_TEXT_BYTES, "text") }
+            is Scene -> {
+                require(parts in 1..Protocol.MAX_SCENE_PARTS) { "parts $parts out of range 1..${Protocol.MAX_SCENE_PARTS}" }
+                require(part in 0 until parts) { "part $part out of range for $parts parts" }
+                require(json.size <= Protocol.MAX_SCENE_PART_BYTES) { "scene part is ${json.size} bytes, max ${Protocol.MAX_SCENE_PART_BYTES}" }
+                v.u16(clip); v.u8(part); v.u8(parts); v.bytes(json)
+            }
             is Status -> {
                 v.u8(batteryPct)
-                v.u8((if (charging) 1 else 0) or (if (usbPower) 2 else 0) or (if (recording) 4 else 0))
+                v.u8((if (charging) 1 else 0) or (if (usbPower) 2 else 0) or (if (recording) 4 else 0) or (if (scenes) 8 else 0))
                 v.u16(pending)
                 v.restString(fwVersion, Protocol.MAX_FW_VERSION_BYTES, "fw_version")
             }
@@ -241,10 +286,11 @@ sealed class CtrlMessage {
                     CfgSet(key, if (key.signed) raw.toShort().toInt() else raw)
                 }
                 MessageType.REPLY -> Reply(r.u16(), ReplyState.fromCode(r.u8()), r.restString())
+                MessageType.SCENE -> Scene(r.u16(), r.u8(), r.u8(), r.rest())
                 MessageType.STATUS -> {
                     val battery = r.u8()
                     val flags = r.u8()
-                    Status(battery, flags and 1 != 0, flags and 2 != 0, flags and 4 != 0, r.u16(), r.restString())
+                    Status(battery, flags and 1 != 0, flags and 2 != 0, flags and 4 != 0, r.u16(), r.restString(), scenes = flags and 8 != 0)
                 }
                 MessageType.CLIP_STARTED -> ClipStarted(r.u16(), r.u8(), r.u32(), r.u64())
                 MessageType.CLIP_ENDED -> ClipEnded(r.u16(), r.u32(), r.u32(), r.u32(), r.u32(), r.u64())

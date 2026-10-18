@@ -101,6 +101,11 @@ class ClipRepository(
         dao.saveReply(id, reply, partial)
     }
 
+    override suspend fun saveSceneReply(id: Long, scene: String, summary: String): Boolean =
+        dao.saveSceneReply(id, scene, summary) == 1
+
+    override suspend fun saveHandoff(id: Long, scene: String, handoff: String): Boolean = dao.saveHandoff(id, scene, handoff) == 1
+
     override suspend fun setState(id: Long, state: ClipState, error: String?) = dao.setState(id, state, error)
 
     override suspend fun transition(id: Long, from: ClipState, to: ClipState, error: String?): Boolean =

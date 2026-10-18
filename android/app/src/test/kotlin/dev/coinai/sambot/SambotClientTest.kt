@@ -49,6 +49,7 @@ class SambotClientTest {
     @Volatile private var promptResponse = json(200, """{"ok":true,"steered":false,"lane":"web","sessionId":"s-1"}""")
     @Volatile private var transcribeResponse = json(200, """{"text":"hello there"}""")
     @Volatile private var healthResponse = json(200, """{"ok":true}""")
+    @Volatile private var sceneResponse = json(200, """{"scene": {"say": "Nine.", "card": {"kind": "stat", "value": "9", "label": "20% of 45"}}, "handoff": null, "issues": []}""")
 
     private lateinit var client: SambotClient
 
@@ -64,6 +65,7 @@ class SambotClientTest {
                 }
                 "/voice/transcribe" -> transcribeResponse
                 "/health" -> healthResponse
+                "/coin/scene" -> sceneResponse
                 else -> json(404, """{"error":"no route"}""")
             }
         }
@@ -323,6 +325,67 @@ class SambotClientTest {
         transcribeResponse = MockResponse.Builder().code(500).body("<html>oops</html>").build()
         val plain = assertThrows(SambotException::class.java) { runBlocking { client.transcribe(byteArrayOf(1)) } }
         assertTrue(plain.message!!, plain.message!!.contains("HTTP 500"))
+    }
+
+    // scene
+
+    @Test
+    fun sceneSendsTextTimeAndOffsetAndKeepsTheSceneCompact() = runBlocking {
+        val result = client.scene("what is 20% of 45", atMs = 1_760_000_000_000, utcOffsetMin = -300)
+
+        assertEquals("""{"say":"Nine.","card":{"kind":"stat","value":"9","label":"20% of 45"}}""", result.scene)
+        assertNull(result.handoff)
+        assertEquals(emptyList<String>(), result.issues)
+        val request = drain().single()
+        assertEquals("POST", request.method)
+        assertEquals("/coin/scene", request.url.encodedPath)
+        assertEquals("Bearer $TOKEN", request.headers["X-Exedev-Authorization"])
+        assertEquals(
+            Json.parseToJsonElement("""{"text":"what is 20% of 45","at_ms":1760000000000,"utc_offset_min":-300}"""),
+            Json.parseToJsonElement(request.body!!.utf8()),
+        )
+    }
+
+    @Test
+    fun sceneLeavesOutUnknownTimeAndReadsTheHandoff() = runBlocking {
+        sceneResponse = json(
+            200,
+            """{"scene":{"say":"On it.","mood":"focus","card":{"kind":"later","text":"Remind you at 5"}},"handoff":"remind me at 5","issues":["model: timeout"],"extra":1}""",
+        )
+        val result = client.scene("remind me at 5")
+
+        assertEquals("remind me at 5", result.handoff)
+        assertEquals(listOf("model: timeout"), result.issues)
+        assertEquals("later", Json.parseToJsonElement(result.scene).jsonObject["card"]!!.jsonObject["kind"]!!.let { (it as JsonPrimitive).content })
+        assertEquals("""{"text":"remind me at 5"}""", drain().single().body!!.utf8())
+    }
+
+    @Test
+    fun sceneMalformedBodiesAndHttpErrorsThrow() {
+        val bad = listOf(
+            "not json",
+            "[]",
+            """{"handoff":null,"issues":[]}""",
+            """{"scene":"text","handoff":null,"issues":[]}""",
+            """{"scene":{"card":{}},"handoff":42,"issues":[]}""",
+            """{"scene":{"card":{}},"handoff":null,"issues":"none"}""",
+        )
+        for (body in bad) {
+            sceneResponse = json(200, body)
+            val e = assertThrows(body, SambotException::class.java) { runBlocking { client.scene("hi") } }
+            assertEquals(body, 200, e.status)
+        }
+
+        sceneResponse = json(503, """{"error":"no model gateway"}""")
+        val unavailable = assertThrows(SambotException::class.java) { runBlocking { client.scene("hi") } }
+        assertEquals(503, unavailable.status)
+        assertTrue(unavailable.message!!, unavailable.message!!.contains("no model gateway"))
+
+        sceneResponse = json(204, "")
+        assertEquals(204, assertThrows(SambotException::class.java) { runBlocking { client.scene("hi") } }.status)
+
+        sceneResponse = MockResponse.Builder().onResponseStart(SocketEffect.CloseSocket()).build()
+        assertThrows(java.io.IOException::class.java) { runBlocking { client.scene("hi") } }
     }
 
     // health and URLs

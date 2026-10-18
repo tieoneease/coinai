@@ -65,6 +65,8 @@ data class DeviceStatus(
     val pending: Int,
     val fwVersion: String,
     val atMs: Long,
+    /** `STATUS` bit 3: the coin draws scenes. */
+    val scenes: Boolean = false,
 ) {
     val batteryKnown: Boolean get() = batteryPct != dev.coinai.protocol.Protocol.BATTERY_UNKNOWN
 }
@@ -91,7 +93,7 @@ class SettingsStore(
         val device = p[STATUS_DEVICE] ?: return@map null
         DeviceStatus(
             device, p[STATUS_BATTERY] ?: 255, p[STATUS_CHARGING] ?: false, p[STATUS_USB] ?: false, p[STATUS_RECORDING] ?: false,
-            p[STATUS_PENDING] ?: 0, p[STATUS_FW].orEmpty(), p[STATUS_AT] ?: 0,
+            p[STATUS_PENDING] ?: 0, p[STATUS_FW].orEmpty(), p[STATUS_AT] ?: 0, p[STATUS_SCENES] ?: false,
         )
     }
 
@@ -210,6 +212,7 @@ class SettingsStore(
             it[STATUS_RECORDING] = status.recording
             it[STATUS_PENDING] = status.pending
             it[STATUS_FW] = status.fwVersion
+            it[STATUS_SCENES] = status.scenes
             it[STATUS_AT] = atMs
         }
     }
@@ -241,6 +244,7 @@ class SettingsStore(
         private val STATUS_PENDING = intPreferencesKey("status_pending")
         private val STATUS_FW = stringPreferencesKey("status_fw")
         private val STATUS_AT = longPreferencesKey("status_at")
+        private val STATUS_SCENES = booleanPreferencesKey("status_scenes")
         private val DELIVERY = intPreferencesKey("coin_delivery")
         /** JSON list of [StoredNetwork]. */
         internal val WIFI_NETWORKS = stringPreferencesKey("coin_wifi_networks")

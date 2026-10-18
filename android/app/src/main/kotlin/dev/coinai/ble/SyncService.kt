@@ -33,7 +33,7 @@ import java.util.TimeZone
 /**
  * Foreground service (type connectedDevice) for one coin visit (PLAN.md D12): connect, run a
  * [dev.coinai.sync.SyncEngine] session, hold the link through the reply window forwarding
- * `REPLY`s (PROTOCOL.md rule 7), disconnect, stop. Started by [CoinPresenceService]. A time zone
+ * `REPLY`s and `SCENE`s (PROTOCOL.md rule 7, "Scenes"), disconnect, stop. Started by [CoinPresenceService]. A time zone
  * change during the visit is sent to the coin at once (rule 8); the engine sends the offset at the
  * start of every session anyway. The delivery order goes out the same way: the engine sends it
  * after `HELLO` and on change during the session, and this service on change during the reply
@@ -132,7 +132,7 @@ class SyncService : Service() {
                     scope.launch { followDelivery(link, app.settings.delivery, sent, log = { app.log("$address: $it") }) }
                 }
                 try {
-                    ReplyWindow(log = app::log).hold(link, result.received.map { it.clip }.toSet(), replies)
+                    ReplyWindow(log = app::log).hold(link, result.received.map { it.clip }.toSet(), replies, scenes = result.status?.scenes == true)
                 } finally {
                     follower?.cancel()
                 }

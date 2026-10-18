@@ -49,7 +49,14 @@ class PromptNotSentException(message: String, status: Int? = null, cause: Throwa
 interface SambotApi {
     suspend fun transcribe(ogg: ByteArray): String
     suspend fun ask(text: String, lane: String = "web", timeout: Duration = 5.minutes, onDelta: ((String) -> Unit)? = null): AskResult
+    suspend fun scene(text: String, atMs: Long? = null, utcOffsetMin: Int? = null): SceneResult
 }
+
+/**
+ * `POST /coin/scene`'s answer (PROTOCOL.md "Scenes"). [scene] is the scene object as compact JSON,
+ * unchanged otherwise; [handoff] is the text for `POST /prompt` when the card is `later`.
+ */
+data class SceneResult(val scene: String, val handoff: String?, val issues: List<String>)
 
 /** [partial] is true when the reply ended by timeout or stream failure instead of `agent_settled`. */
 data class AskResult(val text: String, val steered: Boolean, val partial: Boolean)
@@ -70,6 +77,8 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS)
         .build()
+    /** The composer answers in about a second; a slow one falls back to the plain prompt quickly. */
+    private val sceneHttp: OkHttpClient = http.newBuilder().callTimeout(SCENE_TIMEOUT_S, TimeUnit.SECONDS).build()
 
     /** `GET /health`; true when the server answers `{"ok": true}`. */
     suspend fun health(): Boolean = withContext(Dispatchers.IO) {
@@ -88,6 +97,34 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
         http.newCall(request(url("voice/transcribe")).post(body).build()).await().use { response ->
             if (!response.isSuccessful) throw response.failure("transcribe")
             response.decode<TranscribeResponse>("transcribe").text
+        }
+    }
+
+    /**
+     * `POST /coin/scene`: the composer turns [text] into a scene. [atMs] (recording start, UTC ms)
+     * and [utcOffsetMin] give it the owner's local time; null leaves them out. Anything but a 200
+     * with a scene object, a string or null `handoff` and string `issues` throws [SambotException];
+     * a network failure or the [SCENE_TIMEOUT_S] call timeout throws [IOException]. The route has
+     * no side effects, so a failed call may be repeated.
+     */
+    override suspend fun scene(text: String, atMs: Long?, utcOffsetMin: Int?): SceneResult = withContext(Dispatchers.IO) {
+        val body = JSON.encodeToString(SceneRequest.serializer(), SceneRequest(text, atMs, utcOffsetMin)).toRequestBody(JSON_TYPE)
+        sceneHttp.newCall(request(url("coin/scene")).post(body).build()).await().use { response ->
+            if (response.code != 200) throw response.failure("POST /coin/scene")
+            val obj = response.decode<JsonObject>("POST /coin/scene")
+            fun malformed(why: String) = SambotException("POST /coin/scene: $why", response.code)
+            val scene = obj["scene"] as? JsonObject ?: throw malformed("no scene object")
+            val handoff = when (val h = obj["handoff"]) {
+                null, JsonNull -> null
+                is JsonPrimitive if h.isString -> h.content
+                else -> throw malformed("handoff is not a string")
+            }
+            val issues = when (val i = obj["issues"]) {
+                null, JsonNull -> emptyList()
+                is JsonArray -> i.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: it.toString() }
+                else -> throw malformed("issues is not a list")
+            }
+            SceneResult(scene.toString(), handoff, issues)
         }
     }
 
@@ -244,6 +281,8 @@ class SambotClient(baseUrl: String, private val token: String, okHttpClient: OkH
     companion object {
         const val AUTH_HEADER = "X-Exedev-Authorization"
         const val DEFAULT_BASE_URL = "https://sambot.exe.xyz"
+        /** Whole-call timeout for `POST /coin/scene`. */
+        const val SCENE_TIMEOUT_S = 8L
 
         /**
          * History replayed before `host_stream_live`. Without `tail` SamBot replays the lane's whole
@@ -299,6 +338,14 @@ private data class TranscribeResponse(val text: String)
 
 @Serializable
 private data class PromptRequest(val text: String, val lane: String)
+
+/** Nulls are left out: `JSON` does not encode defaults. */
+@Serializable
+private data class SceneRequest(
+    val text: String,
+    @kotlinx.serialization.SerialName("at_ms") val atMs: Long? = null,
+    @kotlinx.serialization.SerialName("utc_offset_min") val utcOffsetMin: Int? = null,
+)
 
 @Serializable
 private data class PromptResponse(

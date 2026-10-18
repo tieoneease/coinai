@@ -21,6 +21,7 @@ import okio.BufferedSink
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -42,6 +43,12 @@ class ClipProcessorTest {
     private val prompts = AtomicInteger()
     private val transcribes = AtomicInteger()
     private val promptBodies = CopyOnWriteArrayList<String>()
+    private val sceneBodies = CopyOnWriteArrayList<String>()
+    /** The coin's STATUS bit 3, as the processor sees it. */
+    @Volatile private var scenes = false
+    @Volatile private var sceneResponse = json(200, STAT_SCENE)
+    private val handoffFailures = CopyOnWriteArrayList<Pair<Long, String>>()
+    private val logs = CopyOnWriteArrayList<String>()
 
     @Volatile private var transcribeResponse = json(200, """{"text":"turn on the lights"}""")
     @Volatile private var promptResponse: () -> MockResponse = { json(200, """{"ok":true,"steered":false,"lane":"web","sessionId":"s"}""") }
@@ -61,8 +68,19 @@ class ClipProcessorTest {
             store = store,
             sambot = { SambotClient(server.url("/").toString(), requireNotNull(token) { "no token set" }, http) },
             settings = { settings },
-            notifier = { clip, reply -> notified += clip.id to reply },
+            notifier = object : ReplyNotifier {
+                override fun replyReady(clip: ClipRecord, reply: String) {
+                    notified += clip.id to reply
+                }
+
+                override fun handoffFailed(clip: ClipRecord, reason: String) {
+                    handoffFailures += clip.id to reason
+                }
+            },
             replies = { coin += it },
+            showsScenes = { scenes },
+            timeZone = { java.util.TimeZone.getTimeZone("America/New_York") },
+            log = { logs += it },
         )
     }
 
@@ -73,6 +91,7 @@ class ClipProcessorTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when (request.url.encodedPath) {
                 "/voice/transcribe" -> { transcribes.incrementAndGet(); transcribeResponse }
+                "/coin/scene" -> { sceneBodies += request.body!!.utf8(); sceneResponse }
                 "/prompt" -> {
                     prompts.incrementAndGet()
                     promptBodies += request.body!!.utf8()
@@ -107,7 +126,10 @@ class ClipProcessorTest {
     private fun received(voicedMs: Long = 2000, state: ClipState = ClipState.RECEIVED, transcript: String? = null): ClipRecord {
         val file = File(tmp.root, "clip-${System.nanoTime()}.ogg").apply { writeBytes("OggS-fake-audio".toByteArray()) }
         return store.insert(
-            ClipRecord(0, "C0:A1", 7, state, size = file.length(), durationMs = 3000, voicedMs = voicedMs, filePath = file.path, transcript = transcript),
+            ClipRecord(
+                0, "C0:A1", 7, state, size = file.length(), durationMs = 3000, voicedMs = voicedMs, filePath = file.path,
+                transcript = transcript, startedAtMs = STARTED_AT,
+            ),
         )
     }
 
@@ -332,7 +354,153 @@ class ClipProcessorTest {
         assertEquals(1, prompts.get())
     }
 
+    // Scenes (PROTOCOL.md "Scenes")
+
+    @Test
+    fun localSceneAnswersTheCoinWithoutAPrompt() = runBlocking {
+        scenes = true
+        val clip = received()
+
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id))
+
+        val row = store.rows.getValue(clip.id)
+        assertEquals(ClipState.REPLIED, row.state)
+        assertEquals(Json.parseToJsonElement(STAT_SCENE).jsonObject["scene"].toString(), row.scene)
+        assertEquals("9\n20% of 45", row.reply)
+        assertNull(row.handoff)
+        assertEquals(0, prompts.get())
+        assertTrue("no notification for a card the coin shows", notified.isEmpty())
+        assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), coin.map { it.state })
+        assertEquals("turn on the lights", coin[1].text)
+        assertEquals(row.scene, coin.last().scene)
+        assertEquals("9\n20% of 45", coin.last().text)
+        // at_ms is the recording start; the offset is the phone's at that instant (EST, not EDT).
+        val body = Json.parseToJsonElement(sceneBodies.single()).jsonObject
+        assertEquals("turn on the lights", body["text"]!!.jsonPrimitive.content)
+        assertEquals(STARTED_AT, body["at_ms"]!!.jsonPrimitive.content.toLong())
+        assertEquals(-300, body["utc_offset_min"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun laterSceneHandsOffExactlyOnceAndTheCoinGetsOnlyTheScene() = runBlocking {
+        scenes = true
+        sceneResponse = json(200, LATER_SCENE)
+        replyText = "Reminder set for 5 pm."
+        val clip = received()
+
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id))
+
+        val row = store.rows.getValue(clip.id)
+        assertEquals(ClipState.REPLIED, row.state)
+        assertEquals("Reminder set for 5 pm.", row.reply)
+        assertEquals("remind me at 5", row.handoff)
+        assertEquals(1, prompts.get())
+        assertEquals("remind me at 5", Json.parseToJsonElement(promptBodies.single()).jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals(listOf(clip.id to "Reminder set for 5 pm."), notified.toList())
+        assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), coin.map { it.state })
+        assertEquals("Remind you at 5", coin.last().text)
+        assertTrue(coin.last().scene!!.contains("\"later\""))
+
+        processor.process(clip.id)
+        assertEquals("never prompted again", 1, prompts.get())
+        assertEquals(1, sceneBodies.size)
+    }
+
+    @Test
+    fun handoffNotSentIsRetriedWithNothingMoreToTheCoin() = runBlocking {
+        scenes = true
+        sceneResponse = json(200, LATER_SCENE)
+        eventsError = json(503, """{"error":"restarting"}""")
+        val clip = received()
+
+        assertTrue(processor.process(clip.id, attempt = 0) is ClipProcessor.Outcome.Retry)
+        assertEquals(ClipState.TRANSCRIBED, state(clip.id))
+        assertEquals("remind me at 5", store.rows.getValue(clip.id).handoff)
+        assertEquals(0, prompts.get())
+        val shown = coin.toList()
+        assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), shown.map { it.state })
+
+        eventsError = null
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id, attempt = 1))
+        assertEquals(ClipState.REPLIED, state(clip.id))
+        assertEquals("the hand-off, not the transcript", "remind me at 5", Json.parseToJsonElement(promptBodies.single()).jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("composed once", 1, sceneBodies.size)
+        assertEquals("nothing more to the coin", shown, coin.toList())
+        assertEquals(1, notified.size)
+        assertTrue(handoffFailures.isEmpty())
+    }
+
+    @Test
+    fun handoffThatFinallyFailsNotifiesInsteadOfTheCoin() = runBlocking {
+        scenes = true
+        sceneResponse = json(200, LATER_SCENE)
+        eventsError = json(503, """{"error":"restarting"}""")
+        val clip = received()
+        processor.process(clip.id, attempt = 0)
+        val shown = coin.toList()
+
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id, attempt = settings.maxAttempts - 1))
+        assertEquals(ClipState.FAILED, state(clip.id))
+        assertEquals(shown, coin.toList())
+        assertEquals(clip.id, handoffFailures.single().first)
+        assertTrue(notified.isEmpty())
+
+        // An unknown outcome is UNCERTAIN, and notified the same way.
+        eventsError = null
+        promptResponse = { MockResponse.Builder().onResponseStart(SocketEffect.CloseSocket()).build() }
+        val other = received()
+        processor.process(other.id)
+        assertEquals(ClipState.UNCERTAIN, state(other.id))
+        assertEquals(other.id to ClipProcessor.UNCERTAIN_TEXT, handoffFailures.last())
+        assertTrue(coin.none { it.state == ReplyState.FAILED })
+    }
+
+    @Test
+    fun sceneRouteFailureFallsBackToThePlainPrompt() = runBlocking {
+        scenes = true
+        sceneResponse = json(503, """{"error":"no model gateway"}""")
+        val clip = received()
+
+        assertEquals(ClipProcessor.Outcome.Done, processor.process(clip.id))
+
+        val row = store.rows.getValue(clip.id)
+        assertEquals(ClipState.REPLIED, row.state)
+        assertEquals("**Done.** The lights are on.", row.reply)
+        assertNull(row.scene)
+        assertEquals(1, sceneBodies.size)
+        assertEquals("turn on the lights", Json.parseToJsonElement(promptBodies.single()).jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), coin.map { it.state })
+        assertTrue(coin.all { it.scene == null })
+        assertEquals(1, notified.size)
+        assertTrue(logs.toString(), logs.any { "no scene" in it && "no model gateway" in it })
+
+        // A malformed 200 falls back the same way.
+        sceneResponse = json(200, """{"scene":null,"handoff":null,"issues":[]}""")
+        val other = received()
+        processor.process(other.id)
+        assertEquals(ClipState.REPLIED, state(other.id))
+        assertEquals(2, prompts.get())
+    }
+
+    @Test
+    fun coinWithoutScenesNeverCallsTheComposer() = runBlocking {
+        val clip = received()
+
+        processor.process(clip.id)
+
+        assertEquals(ClipState.REPLIED, state(clip.id))
+        assertEquals(0, sceneBodies.size)
+        assertEquals(1, prompts.get())
+        assertEquals(listOf(ReplyState.TRANSCRIBING, ReplyState.THINKING, ReplyState.DONE), coin.map { it.state })
+    }
+
+
     private companion object {
+        /** 2026-01-15 12:00 UTC: EST, UTC-5. */
+        const val STARTED_AT = 1_768_478_400_000L
+        const val STAT_SCENE = """{"scene":{"say":"Nine. Easy one.","mood":"happy","card":{"kind":"stat","value":"9","label":"20% of 45"}},"handoff":null,"issues":[]}"""
+        const val LATER_SCENE = """{"scene":{"say":"On it.","mood":"focus","card":{"kind":"later","text":"Remind you at 5"}},"handoff":"remind me at 5","issues":[]}"""
+
         fun ev(json: String) = "data: $json\n\n"
         fun json(code: Int, body: String) =
             MockResponse.Builder().code(code).addHeader("Content-Type", "application/json").body(body).build()

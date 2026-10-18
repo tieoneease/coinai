@@ -56,6 +56,12 @@ class CoinaiApp : Application() {
     val clips: ClipRepository by lazy { ClipRepository(ClipDatabase.open(this), File(filesDir, "clips")) }
     val replyBus = ReplyBus()
 
+    /**
+     * `STATUS` bit 3 per coin from this process's sessions, set before the clips of the session are
+     * handed to processing; the stored last status covers clips processed after a restart.
+     */
+    private val showsScenes = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
     val processor: ClipProcessor by lazy {
         ClipProcessor(
             store = clips,
@@ -67,6 +73,10 @@ class CoinaiApp : Application() {
             settings = { ProcessingSettings(voicedThresholdMs = settings.voicedThresholdMs.first()) },
             notifier = ReplyNotifications(this) { sambotSettings.value.baseUrl },
             replies = replyBus,
+            showsScenes = { device ->
+                showsScenes[device] ?: settings.deviceStatus.first()?.takeIf { it.device == device }?.scenes ?: false
+            },
+            log = ::log,
         )
     }
 
@@ -74,6 +84,7 @@ class CoinaiApp : Application() {
         clips,
         listener = object : SyncListener {
             override fun onStatus(device: String, status: CtrlMessage.Status) {
+                showsScenes[device] = status.scenes
                 appScope.launch { settings.saveDeviceStatus(device, status, System.currentTimeMillis()) }
             }
 

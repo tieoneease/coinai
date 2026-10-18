@@ -71,6 +71,15 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     var claimAfterList: Set<Int> = emptySet()
 
     var listChunk = Protocol.MAX_LIST_ENTRIES
+    /** `STATUS` bit 3. */
+    var showsScenes = false
+    /** Scenes this coin drew: (clip, JSON). */
+    val shownScenes = mutableListOf<Pair<Int, String>>()
+    /** Card kinds the coin cannot draw; a scene with one gets `ERROR` 5, as an unknown kind does. */
+    var refuseKinds: Set<String> = emptySet()
+    private var sceneClip = -1
+    private var sceneParts = 0
+    private var sceneBytes = ByteArrayOutputStream()
     var answerHello = true
     var fwVersion = "0.1.0"
     var packetInterval: Duration = 5.milliseconds
@@ -139,6 +148,7 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
         when (m) {
             is CtrlMessage.Hello -> if (answerHello) emitStatus()
             is CtrlMessage.CfgSet -> settings[m.key] = m.value
+            is CtrlMessage.Scene -> scenePart(m)
             is CtrlMessage.WifiSet -> {
                 val s = m.ssid.toByteArray().size
                 val p = m.password.toByteArray().size
@@ -185,8 +195,39 @@ class FakeCoin(private val scope: CoroutineScope, override val deviceAddress: St
     }
 
     private fun emitStatus() = emit(
-        CtrlMessage.Status(87, charging = false, usbPower = false, recording = clips.values.any { !it.complete }, pending = clips.count { it.key !in wifiClaimed }, fwVersion = fwVersion),
+        CtrlMessage.Status(
+            87, charging = false, usbPower = false, recording = clips.values.any { !it.complete },
+            pending = clips.count { it.key !in wifiClaimed }, fwVersion = fwVersion, scenes = showsScenes,
+        ),
     )
+
+    /**
+     * PROTOCOL.md "Scenes": part 0 starts a scene, a part that does not continue it drops it with
+     * `ERROR` 5, and after the last part the scene is drawn, or refused with `ERROR` 5 when it is
+     * not JSON with a card of a kind the coin draws. A coin without scenes ignores `SCENE`.
+     */
+    private fun scenePart(m: CtrlMessage.Scene) {
+        if (!showsScenes) return
+        if (m.part == 0) {
+            sceneClip = m.clip
+            sceneParts = m.parts
+            sceneBytes = ByteArrayOutputStream()
+        } else if (m.clip != sceneClip || m.parts != sceneParts || m.part * Protocol.MAX_SCENE_PART_BYTES != sceneBytes.size()) {
+            sceneClip = -1
+            return emit(CtrlMessage.Error(MessageType.SCENE, ErrorCode.INVALID_VALUE, m.clip))
+        }
+        sceneBytes.write(m.json)
+        if (m.part != m.parts - 1) return
+        val json = sceneBytes.toString(Charsets.UTF_8)
+        sceneClip = -1
+        val kind = runCatching {
+            val card = kotlinx.serialization.json.Json.parseToJsonElement(json).let { it as kotlinx.serialization.json.JsonObject }["card"]
+                as kotlinx.serialization.json.JsonObject
+            (card["kind"] as kotlinx.serialization.json.JsonPrimitive).content
+        }.getOrNull()
+        if (kind == null || kind in refuseKinds) emit(CtrlMessage.Error(MessageType.SCENE, ErrorCode.INVALID_VALUE, m.clip))
+        else shownScenes += m.clip to json
+    }
 
     fun emit(message: CtrlMessage) {
         toApp += message

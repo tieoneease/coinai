@@ -60,6 +60,84 @@ class ReplyWindowTest {
         assertTrue(thinking.text.all { it in ' '..'~' })
     }
 
+    private fun scene(kind: String, extra: String = "") =
+        """{"say":"Here.","mood":"happy","card":{"kind":"$kind"$extra}}"""
+
+    @Test
+    fun sceneGoesOutInPartsAndEndsTheClip() = runTest {
+        val coin = FakeCoin(backgroundScope).apply { showsScenes = true }
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        val long = scene("steps", ""","title":"Reset","steps":["${"a".repeat(200)}","${"b".repeat(200)}"]""")
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.THINKING, "reset the router"))
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "Reset", scene = long))
+
+        val delivered = ReplyWindow().hold(coin, setOf(5), ch, scenes = true)
+
+        assertEquals(setOf(5), delivered)
+        assertEquals(listOf(ReplyState.THINKING), replies(coin).map { it.state })
+        val parts = coin.fromApp.filterIsInstance<CtrlMessage.Scene>()
+        assertEquals(listOf(0, 1, 2), parts.map { it.part })
+        assertTrue(parts.all { it.parts == 3 && it.clip == 5 })
+        assertEquals(listOf(5 to long), coin.shownScenes)
+        assertTrue("waited only the refusal grace", currentTime <= ReplyWindow.SCENE_GRACE.inWholeMilliseconds)
+    }
+
+    @Test
+    fun refusedSceneGetsItsSummaryAsReply() = runTest {
+        val coin = FakeCoin(backgroundScope).apply { showsScenes = true; refuseKinds = setOf("timer") }
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "Tea\n3 min", scene = scene("timer", ""","label":"Tea","seconds":180""")))
+
+        val delivered = ReplyWindow().hold(coin, setOf(5), ch, scenes = true)
+
+        assertEquals(setOf(5), delivered)
+        assertTrue(coin.shownScenes.isEmpty())
+        assertTrue(coin.toApp.any { it is CtrlMessage.Error && it.requestType == dev.coinai.protocol.MessageType.SCENE && it.clip == 5 })
+        val fallback = replies(coin).single()
+        assertEquals(ReplyState.DONE, fallback.state)
+        assertEquals(5, fallback.clip)
+        assertEquals("Tea\n3 min", fallback.text)
+        // The REPLY follows the SCENE.
+        assertTrue(coin.fromApp.indexOf(fallback) > coin.fromApp.indexOfFirst { it is CtrlMessage.Scene })
+    }
+
+    @Test
+    fun refusalForAnEarlierClipIsHandledWhileAnotherWaits() = runTest {
+        val coin = FakeCoin(backgroundScope).apply { showsScenes = true; refuseKinds = setOf("timer") }
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        val held = async { ReplyWindow().hold(coin, setOf(5, 6), ch, scenes = true) }
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "Tea – 3 min", scene = scene("timer", ""","label":"Tea","seconds":180""")))
+        delay(5_000)
+        assertEquals("Tea - 3 min", replies(coin).single().text)
+        ch.send(CoinReply(coin.deviceAddress, 6, ReplyState.DONE, "done"))
+        assertEquals(setOf(5, 6), held.await())
+    }
+
+    @Test
+    fun coinWithoutScenesGetsTheSummary() = runTest {
+        val coin = FakeCoin(backgroundScope)
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "9\n20% of 45", scene = scene("stat", ""","value":"9","label":"20% of 45"""")))
+
+        assertEquals(setOf(5), ReplyWindow().hold(coin, setOf(5), ch, scenes = false))
+
+        assertTrue(coin.fromApp.none { it is CtrlMessage.Scene })
+        assertEquals("9\n20% of 45", replies(coin).single().text)
+        assertTrue(currentTime < 1000)
+    }
+
+    @Test
+    fun sceneTooLongForEightPartsGetsTheSummary() = runTest {
+        val coin = FakeCoin(backgroundScope).apply { showsScenes = true }
+        val ch = Channel<CoinReply>(Channel.UNLIMITED)
+        val huge = scene("answer", ""","title":"T","body":"${"x".repeat(Protocol.MAX_SCENE_PART_BYTES * Protocol.MAX_SCENE_PARTS)}"""")
+        ch.send(CoinReply(coin.deviceAddress, 5, ReplyState.DONE, "T", scene = huge))
+
+        assertEquals(setOf(5), ReplyWindow().hold(coin, setOf(5), ch, scenes = true))
+        assertTrue(coin.fromApp.none { it is CtrlMessage.Scene })
+        assertEquals("T", replies(coin).single().text)
+    }
+
     @Test
     fun windowClosesAfterTheDefault() = runTest {
         val coin = FakeCoin(backgroundScope)

@@ -13,6 +13,7 @@ import dev.coinai.MainActivity
 import dev.coinai.clips.ClipRecord
 import dev.coinai.clips.PlainText
 import dev.coinai.clips.ReplyNotifier
+import dev.coinai.clips.SceneSummary
 
 object Notifications {
     const val CHANNEL_REPLIES = "replies"
@@ -60,6 +61,22 @@ object Notifications {
             .setContentIntent(PendingIntent.getActivity(context, clip.id.toInt(), open, PendingIntent.FLAG_IMMUTABLE))
             .build()
     }
+
+    /** A hand-off that did not reach SamBot; the coin still shows "SamBot is on it". Opens the app. */
+    fun handoffFailed(context: Context, clip: ClipRecord, reason: String): Notification {
+        val task = clip.scene?.let(SceneSummary::laterText)?.takeIf { it.isNotBlank() } ?: clip.handoff ?: clip.transcript.orEmpty()
+        val text = "$task\n$reason".trim()
+        return Notification.Builder(context, CHANNEL_REPLIES)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("SamBot didn't get it")
+            .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setContentIntent(
+                PendingIntent.getActivity(context, clip.id.toInt(), Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE),
+            )
+            .build()
+    }
 }
 
 class ReplyNotifications(private val context: Context, private val baseUrl: () -> String) : ReplyNotifier {
@@ -67,6 +84,12 @@ class ReplyNotifications(private val context: Context, private val baseUrl: () -
         if (!Notifications.canPost(context)) return
         context.getSystemService(NotificationManager::class.java)
             .notify(REPLY_TAG, clip.id.toInt(), Notifications.reply(context, clip, reply, baseUrl()))
+    }
+
+    override fun handoffFailed(clip: ClipRecord, reason: String) {
+        if (!Notifications.canPost(context)) return
+        context.getSystemService(NotificationManager::class.java)
+            .notify(REPLY_TAG, clip.id.toInt(), Notifications.handoffFailed(context, clip, reason))
     }
 
     private companion object {
