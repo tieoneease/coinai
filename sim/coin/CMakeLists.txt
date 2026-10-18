@@ -67,14 +67,22 @@ target_compile_definitions(lvgl PUBLIC ${SIM_DEFINES})
 target_compile_options(lvgl PRIVATE -w)
 
 # ---------- the firmware and its simulated hardware ----------
-set(FW_SRC app_main.c battlog.c pmic.c input.c imu.c ui.c kbd.c eyes.c diag.c audio.c ogg.c clipstore.c power.c ble.c settings.c)
+set(FW_SRC app_main.c battlog.c pmic.c input.c imu.c ui.c kbd.c eyes.c diag.c audio.c ogg.c clipstore.c power.c ble.c settings.c scene.c)
 list(TRANSFORM FW_SRC PREPEND ${FW}/main/)
 set(SIM_SRC main.c simlink.c freertos.c esp_core.c storage.c periph.c audio_dev.c display_sim.c ble_link_sim.c net_sim.c)
 list(TRANSFORM SIM_SRC PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
+
+# cJSON from the ESP-IDF the firmware was built with (scene.c parses scenes with it).
+file(READ ${FW}/build/project_description.json FW_DESC)
+string(JSON IDF_DIR GET "${FW_DESC}" idf_path)
+set(CJSON_DIR ${IDF_DIR}/components/json/cJSON)
+add_library(cjson STATIC ${CJSON_DIR}/cJSON.c)
+target_include_directories(cjson PUBLIC ${CJSON_DIR})
+target_compile_options(cjson PRIVATE -w)
 
 add_executable(coinsim ${FW_SRC} ${SIM_SRC})
 target_compile_definitions(coinsim PRIVATE "PROJECT_VER=\"${FW_VER}-sim\"")
 target_compile_options(coinsim PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
 set_source_files_properties(${FW_SRC} PROPERTIES COMPILE_OPTIONS "-include;sim_force.h")
-target_link_libraries(coinsim PRIVATE lvgl opus ws2_32 winmm)
+target_link_libraries(coinsim PRIVATE lvgl opus cjson ws2_32 winmm)
 target_link_options(coinsim PRIVATE -static)

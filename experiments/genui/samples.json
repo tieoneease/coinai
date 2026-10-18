@@ -1,0 +1,18 @@
+[
+  {"say": "Tokyo. It has been the capital since 1869.", "mood": "content",
+   "card": {"kind": "answer", "title": "Tokyo", "body": "Capital of Japan since 1869, when the emperor moved from Kyoto."}},
+  {"say": "Twelve sixty, so about ninety-seven in total.", "mood": "happy",
+   "card": {"kind": "stat", "value": "$12.60", "label": "15% tip on $84", "sub": "$96.60 in total"}},
+  {"say": "Here's your list.", "mood": "focus",
+   "card": {"kind": "list", "title": "Groceries", "items": ["Eggs", "Oat milk", "Spinach", "Lemons", "Coffee beans"]}},
+  {"say": "Four steps. Tap the right side for the next one.", "mood": "focus",
+   "card": {"kind": "steps", "title": "Soft-boiled egg", "steps": ["Bring a pot of water to a rolling boil.", "Lower the eggs in gently with a spoon.", "Boil for six and a half minutes.", "Move them to ice water for two minutes, then peel."]}},
+  {"say": "Ten minutes, starting now.", "mood": "happy",
+   "card": {"kind": "timer", "label": "Pasta", "seconds": 600}},
+  {"say": "Do you want me to ask SamBot to book it?", "mood": "curious",
+   "card": {"kind": "confirm", "question": "Book the 7:30 table for two?", "yes": "Book it", "no": "Not now"}},
+  {"say": "I'll ask SamBot. The answer will come in the app.", "mood": "think",
+   "card": {"kind": "later", "text": "Asking SamBot about tomorrow's weather"}},
+  {"say": "This one is broken on purpose \u2014 too long, an unknown field and a bad mood.", "mood": "elated",
+   "card": {"kind": "answer", "title": "A title that is far too long to fit in two lines of the largest font on a round screen", "body": "Fine.", "emoji": "\u2728"}}
+]
