@@ -75,7 +75,7 @@ The AVD `coinai_api36` (Android 16, Google APIs, x86_64, Pixel 7) is already cre
 cd sim/host && $PY -m pytest tests -q
 ```
 
-`test_real_coin.py` runs the real `coinsim.exe` (skipped if it is not built): boot, a recorded sentence passing the speech gate, pairing, GET with size and CRC checked against the stored file, ACK and deletion, Standby and the PTT wake with RTC memory and the phone-set clock, and a tap faster than LVGL's input poll. The other tests use `fake_coin.py`, a Python stand-in for the coin.
+`test_real_coin.py` runs the real `coinsim.exe` (skipped if it is not built): boot, a recorded sentence passing the speech gate, pairing, GET with size and CRC checked against the stored file, ACK and deletion, Standby and the PTT wake with RTC memory and the phone-set clock, and a tap faster than LVGL's input poll. `test_scenes` sends a two-part `SCENE` after a clip's `ACK` and checks it ends the reply window, and that a scene without a card gets `ERROR` 5; `test_scene_timer_through_standby` (about 75 s) lets a timer card put the coin in Standby with a timer wake and checks it goes off on time. The other tests use `fake_coin.py`, a Python stand-in for the coin.
 
 ## How faithful it is
 

@@ -22,7 +22,7 @@ Scenes (PROTOCOL.md "Scenes", PLAN.md D22), for a coin whose last `STATUS` has b
 - A `handoff` (a `later` card): it is kept on the `TRANSCRIBED` clip and prompted instead of the transcript, claimed at most once as above. Nothing more goes to the coin. The row says "Handed to SamBot" until SamBot's reply arrives (notification as usual); a hand-off that ends `FAILED` or `UNCERTAIN` posts a notification instead of a coin line. A retry reuses the kept scene: the route is not called again.
 - The route fails (network, 8 s timeout, non-200, malformed body): logged, and the clip takes the plain way (prompt the transcript, `REPLY`).
 
-Open protocol questions are marked `// PROTOCOL-Q:` in the code. One: the protocol gives no time bound for the `ERROR` 5 that refuses a `SCENE`, so `ReplyWindow` waits 2 s after the last part (also past the last clip's answer) before taking silence as accepted.
+Open protocol questions are marked `// PROTOCOL-Q:` in the code. A refused `SCENE` gets its `ERROR` 5 within 2 s of the last part (PROTOCOL.md), so `ReplyWindow` waits that long after the last part (also past the last clip's answer) before taking silence as accepted.
 
 Settings on the main screen: SamBot, **Delivery** (Wi-Fi first, the default / phone first / phone only; `CFG_SET` key `0x06` after `HELLO` in every session and at once when changed during a visit), **Coin Wi-Fi** (add a network or an open one, list, remove from the app's list; a new network waits for the next session, goes out with `WIFI_SET` after `STATUS`, and shows as sent or refused; the coin keeps the 4 newest and cannot forget one over BLE), Processing.
 
@@ -46,6 +46,10 @@ Against the simulated coin over netsim (sim/README.md, "With the Android emulato
   - The prompt and the `/events` stream worked through the exe.dev proxy with the token.
   - SamBot's answer took 91 s: it set the reminder, added to the list, and corrected its own date.
   - By then the coin's 45 s reply window (PROTOCOL.md rule 7) had closed. The coin went back to its face and then to Standby. The answer is on the phone only: the clip row and a notification.
+- **Scenes (2026-10-18), against the live `/coin/scene`:**
+  - A synthetic question ("What is seventeen times twenty three?", Windows speech) went coin, app, transcription, composer. The coin showed the transcript 1.6 s after the `ACK`, and the `SCENE` (one part, 119 bytes) 0.5 s later: "391 / 17 times 23". Nothing was prompted. The row says "Answered on the coin" with the card's summary.
+  - `sim/samples/remind-me.ogg` became a `later` card 0.45 s after the transcript: "Remind: call dentist 9am; add milk" and "SamBot is on it". The app prompted the hand-off once, with nothing more to the coin. SamBot's answer reached the row and a notification about 20 s later; it saw the request had been handled already and changed nothing.
+  - The Room database moved from version 1 to 2 in place on install, keeping the earlier clips.
 
 The emulator's Bluetooth controller never reports the advertiser tracking that CDM's presence scan uses: 0 results, whatever the address type. So each visit stands in for that one report with `adb shell cmd companiondevice simulate-device-event <association id> 0`, and with event 1 before the next press. Everything after it is the real path: CDM binds `CoinPresenceService`, `SyncService` connects, and so on.
 
@@ -55,7 +59,7 @@ The emulator's Bluetooth controller never reports the advertiser tracking that C
 - ColorOS's battery manager;
 - a SamBot answer inside the reply window, shown on the coin (the coin's own Wi-Fi path has done this);
 - OTA;
-- scenes (`SCENE`, `/coin/scene`, hand-offs): unit-tested against `FakeCoin` and MockWebServer only.
+- a scene the coin refuses (`ERROR` 5), and the composer down: unit-tested only.
 
 `KeystoreSecretBox` needs a real Keystore; its tests use the same AES-GCM with an in-memory key.
 

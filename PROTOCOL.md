@@ -165,7 +165,7 @@ response  200 {"scene": {...}, "handoff": "<text for SamBot>" | null, "issues": 
 
 A scene answered by the composer alone (not `later`) is not in SamBot's conversation. The app keeps it with the clip.
 
-**Status (2026-10-18):** the route is live on SamBot. In the simulator the firmware shows one- and two-part scenes over BLE and refuses bad ones with `ERROR` 5. A timer card ran through Standby: the coin slept with an 87 s timer wake, woke 2.5 s early and chimed at the end. Not yet run on the device.
+**Status (2026-10-18):** the route is live on SamBot. In the simulator the firmware shows one- and two-part scenes over BLE and refuses bad ones with `ERROR` 5. A timer card ran through Standby: the coin slept with an 87 s timer wake, woke 2.5 s early and chimed at the end. With the app on the Android emulator, a spoken question came back as a card 0.5 s after the transcript, and a request for SamBot as a `later` card whose hand-off SamBot answered on the phone (android/README.md). Not yet run on the device, and the coin's Wi-Fi path not yet at all.
 
 ## Wi-Fi delivery
 

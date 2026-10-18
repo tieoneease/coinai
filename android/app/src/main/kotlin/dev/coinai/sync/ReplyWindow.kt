@@ -109,8 +109,7 @@ class ReplyWindow(
                 if (!goOn) break
             }
         }
-        // An accepted SCENE gets no answer; a refused one gets ERROR soon after its last part.
-        // PROTOCOL-Q: the protocol gives no bound for that ERROR; SCENE_GRACE is the app's guess.
+        // An accepted SCENE gets no answer; a refused one gets ERROR within 2 s of its last part.
         if (unconfirmed.isNotEmpty() && link.state.value != LinkState.DISCONNECTED) {
             withTimeoutOrNull(sceneGrace) {
                 while (unconfirmed.isNotEmpty()) {
@@ -129,7 +128,7 @@ class ReplyWindow(
 
     companion object {
         val DEFAULT = 45.seconds
-        /** How long after a scene's last part a refusal is still expected. */
+        /** How long after a scene's last part a refusal can still come (PROTOCOL.md "Scenes": 2 s). */
         val SCENE_GRACE = 2.seconds
     }
 }
