@@ -36,6 +36,11 @@ Against the simulated coin over netsim (sim/README.md, "With the Android emulato
 - **Visits:** Standby, a PWR hold, and the clip on the phone 1.75–2.7 s after release, with the stored bond and no prompt. This held with the app process killed, after `am force-stop`, and in forced Doze (`dumpsys deviceidle force-idle`).
 - **Settings:** Delivery reaches the coin and is stored there.
 - **Processing without a token:** a voiced clip of 4060 ms fails and the coin shows "Didn't reach SamBot / Set up SamBot in the coinai app" about 0.2 s after the clip ends.
+- **SamBot with the token (2026-10-18):** `sim/samples/remind-me.ogg` was spoken into the coin.
+  - The coin showed `transcribing` 0.5 s after the clip reached the phone, then `thinking` with SamBot's exact transcript 0.8 s later.
+  - The prompt and the `/events` stream worked through the exe.dev proxy with the token.
+  - SamBot's answer took 91 s: it set the reminder, added to the list, and corrected its own date.
+  - By then the coin's 45 s reply window (PROTOCOL.md rule 7) had closed. The coin went back to its face and then to Standby. The answer is on the phone only: the clip row and a notification.
 
 The emulator's Bluetooth controller never reports the advertiser tracking that CDM's presence scan uses: 0 results, whatever the address type. So each visit stands in for that one report with `adb shell cmd companiondevice simulate-device-event <association id> 0`, and with event 1 before the next press. Everything after it is the real path: CDM binds `CoinPresenceService`, `SyncService` connects, and so on.
 
@@ -43,7 +48,7 @@ The emulator's Bluetooth controller never reports the advertiser tracking that C
 - the real phone's presence detection and its latency;
 - whether a real presence report also starts a force-stopped app;
 - ColorOS's battery manager;
-- SamBot with a token from the app;
+- a SamBot answer inside the reply window, shown on the coin (the coin's own Wi-Fi path has done this);
 - OTA.
 
 `KeystoreSecretBox` needs a real Keystore; its tests use the same AES-GCM with an in-memory key.
