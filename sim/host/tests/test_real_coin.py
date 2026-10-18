@@ -206,6 +206,59 @@ def test_scene_timer_with_the_screen_off_on_usb(rig):
     wait_line(api, seq, r'standby: timer 0 s', timeout=20)
 
 
+def ui_lines(api):
+    seq = console_seq(api)
+    post(f'{api}/api/console', {'line': 'ui state'})
+    wait_line(api, seq, r'ui: keeps the coin awake')
+    return [line for line in console_since(api, seq) if line.startswith('ui:')]
+
+
+def test_scene_after_a_late_reply_keeps_its_card(rig):
+    """The screen is off and the phone's transcript REPLY wakes it; the timer card for the same clip comes while the
+    eyes are waking. The card stays (the transcript once replaced it before the timer was armed)."""
+    phone_port, api, tmp = rig
+    post(f'{api}/api/input', {'usb': True})
+    seq = console_seq(api)
+    # CFG_SET idle_timeout_s 8: drowsy comes 4 s before, so the card is still up when looked at
+    post(f'{api}/api/console', {'line': 'ble inject 060300030800'})
+    wait_line(api, seq, r'idle on USB power: screen off', timeout=20)
+    time.sleep(1.5)
+    timer = json.dumps({'mood': 'focus', 'card': {'kind': 'timer', 'label': 'Pasta', 'seconds': 300}})
+    for clip, gap in ((7, 0.3), (8, 0.0)):  # during the wake, then queued back to back
+        if clip == 8:
+            wait_line(api, seq, r'idle on USB power: screen off', timeout=20)
+            time.sleep(1.5)
+        seq = console_seq(api)
+        post(f'{api}/api/console', {'line': 'ble inject ' + tlv.reply(clip, 1, 'set a pasta timer').hex()})
+        time.sleep(gap)
+        post(f'{api}/api/console', {'line': 'ble inject ' + tlv.scene(clip, timer)[0].hex()})
+        wait_line(api, seq, rf'SCENE clip {clip}: \d+ bytes, shown')
+        time.sleep(1.5)
+        lines = ui_lines(api)
+        assert lines[0].startswith('ui: mode scene'), (gap, lines)
+        assert any('timer "Pasta" ends in' in line for line in lines), (gap, lines)
+
+
+def test_scene_timer_held_by_a_busy_screen(rig):
+    """A timer comes due on the keyboard screen, which the alarm does not interrupt: it holds the coin awake for at
+    most 60 s more, then Standby wakes 1 s later for it, and it goes off. About 75 s."""
+    phone_port, api, tmp = rig
+    post(f'{api}/api/input', {'usb': False})
+    post(f'{api}/api/console', {'line': 'ble inject 060300030500'})  # CFG_SET idle_timeout_s 5
+    timer = json.dumps({'mood': 'focus', 'card': {'kind': 'timer', 'label': 'Tea', 'seconds': 4}})
+    seq = console_seq(api)
+    t0 = time.monotonic()
+    post(f'{api}/api/console', {'line': 'ble inject ' + tlv.scene(5, timer)[0].hex()})
+    wait_line(api, seq, r'SCENE clip 5: \d+ bytes, shown')
+    post(f'{api}/api/console', {'line': 'ui show kbd'})
+    time.sleep(8)
+    assert ui_mode(api) == 'kbd'
+    m = wait_line(api, seq, r'standby: timer (\d+) s', timeout=80)
+    assert m.group(1) == '1' and 62 < time.monotonic() - t0 < 70, (m.group(0), time.monotonic() - t0)
+    wait_line(api, seq, r'wake: timer', timeout=10)
+    wait_line(api, seq, r'SCENE-ACTION timer done', timeout=10)
+
+
 # The on-screen keyboard's keys (firmware/main/kbd.c): row centres and the first key's left edge.
 KEY_ROWS = {0: (190, 20, 'qwertyuiop', '1234567890'), 1: (240, 42, 'asdfghjkl', '-/:;()$&@"'),
             2: (290, 85, 'zxcvbnm', '.,?!\'')}

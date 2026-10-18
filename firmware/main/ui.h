@@ -74,6 +74,8 @@ bool ui_show_scene(uint16_t clip, const char *json, size_t len);
 // Seconds of Standby before a running timer card needs the coin again; 0 without one. Call it only
 // as the coin goes to Standby: the alarm then waits for the wake.
 uint32_t ui_alarm_standby_s(void);
+// While the coin waits to go to Standby (a PWR tap), a timer coming due waits for the wake too.
+void ui_alarm_hold(bool hold);
 // Uptime in ms of the UI's last tick (every 15 ms while LVGL runs); 0 before the first. Lock-free.
 uint32_t ui_heartbeat_ms(void);
 // Console: ui perf [reset] | ui demo <flow> | ui show <screen> | ui expr <name>

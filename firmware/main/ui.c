@@ -658,6 +658,8 @@ static float f_collapse(int k);
 static float f_wake(int k);
 static float f_power_on(int k);
 static float f_wait_rec(int k);
+static float f_scene(int k);
+static uint16_t s_scene_clip;  // the clip the scene answers; 0 for the console's and the alarm's
 
 static void flow_start(flow_fn f, const char *name)
 {
@@ -2406,7 +2408,9 @@ static void react(void)
         }
     }
 
-    if (busy_mode() || STARTED()) {
+    // A scene not started yet (its flow's first step runs after this) is let start first: what else
+    // changed (the reply window closing with it, a reply seen late) is weighed against the card.
+    if (busy_mode() || STARTED() || (s_flow == f_scene && s_step == 0)) {
         s_prev.rec = in->rec;
         return;
     }
@@ -2430,7 +2434,10 @@ static void react(void)
     // Replies from the phone (PROTOCOL.md REPLY).
     bool reply_changed = in->ble.reply_state != pv->ble.reply_state || in->ble.reply_clip != pv->ble.reply_clip ||
                          strcmp(in->ble.reply_text, pv->ble.reply_text) != 0;
-    if (reply_changed && in->ble.reply_state >= 0) {
+    // The scene answering a clip outranks that clip's progress (transcribing, thinking) seen late:
+    // queued while the screen was off, say, or behind the scene in the same tick.
+    bool superseded = s_scene_clip && in->ble.reply_clip == s_scene_clip && in->ble.reply_state < 2 && s_mode == M_SCENE;
+    if (reply_changed && in->ble.reply_state >= 0 && !superseded) {
         memcpy(s_text, in->ble.reply_text, sizeof s_text - 1);
         s_text[sizeof s_text - 1] = 0;
         if (in->ble.reply_state >= 2 && !s_demo) {
@@ -2654,7 +2661,7 @@ static RTC_DATA_ATTR struct {
     char label[24];
 } s_alarm;
 static bool s_scene_alarm;  // the scene being shown is the alarm going off
-static bool s_alarm_frozen;  // the coin is going to Standby: the alarm waits for the wake (ui_alarm_standby_s)
+static bool s_alarm_frozen;  // the coin is headed for Standby: the alarm waits for the wake (ui_alarm_hold)
 
 static uint64_t us_to_ticks(int64_t us)
 {
@@ -2798,11 +2805,8 @@ static float f_scene(int k)
         s_scene_page = 0;
         s_timer_done = false;
         s_timer_run = sc->kind == CARD_TIMER && sc->seconds > 0;
-        s_timer_left = s_scene_alarm ? 0 : (float)sc->seconds;
+        s_timer_left = s_scene_alarm ? 0 : (float)sc->seconds;  // armed by scene_show, which ran first
         s_timer_end = s_now + s_timer_left;
-        if (s_timer_run && !s_scene_alarm) {
-            alarm_arm(sc->n_lines ? sc->lines[0].text : "Timer", sc->seconds, s_timer_left);
-        }
         s_scene_alarm = false;
         items_hide_except(0);
         eyes_zzz(false);
@@ -2966,15 +2970,31 @@ static void scene_tap(int x, int y)
     eyes_ripple(x, y);
 }
 
-// Under the display lock (scene_console).
+// A timer card's alarm is armed as the scene is taken, whatever then becomes of its card on screen.
+static void arm_scene_timer(void)
+{
+    const scene_t *sc = scene_get();
+    if (!s_scene_alarm && sc->kind == CARD_TIMER && sc->seconds > 0) {
+        alarm_arm(sc->n_lines ? sc->lines[0].text : "Timer", sc->seconds, (float)sc->seconds);
+    }
+}
+
+// Under the display lock (scene_console, ui_show_scene, alarm_check).
 static bool scene_show(void)
 {
+    arm_scene_timer();
     FLOW(f_scene);
-    // The mode now, not at the flow's first step on the next tick: the reply window closing with the
-    // scene must not send the screen back to the face meanwhile (M_THINK in react).
-    s_mode = M_SCENE;
+    s_drowsy_done = true;  // a drowsy due before the card's activity reached the control loop
     lv_display_trigger_activity(NULL);
     return true;
+}
+
+// Under the display lock: a scene loaded by `ui scene`, which answers no clip.
+static bool scene_console_show(void)
+{
+    s_scene_alarm = false;
+    s_scene_clip = 0;
+    return scene_show();
 }
 
 bool ui_show_scene(uint16_t clip, const char *json, size_t len)
@@ -2984,6 +3004,10 @@ bool ui_show_scene(uint16_t clip, const char *json, size_t len)
         return false;
     }
     bool ok = scene_load(json, len);
+    if (ok) {
+        s_scene_alarm = false;  // this scene, not an alarm card started in the same tick
+        s_scene_clip = clip;
+    }
     if (ok && clip) {  // clip 0: a scene from the console (net scene, ui scene), not an answer
         char line[200];
         scene_summary(line, sizeof line);
@@ -2992,11 +3016,10 @@ bool ui_show_scene(uint16_t clip, const char *json, size_t len)
     if (ok) {
         // A recording started since keeps its screen; the card is in the recent list, and a timer
         // still runs: its alarm goes off when it ends.
-        const scene_t *sc = scene_get();
         if (!audio_is_recording() && s_mode != M_LISTEN && s_mode != M_POWERHOLD) {
             scene_show();
-        } else if (sc->kind == CARD_TIMER && sc->seconds > 0) {
-            alarm_arm(sc->n_lines ? sc->lines[0].text : "Timer", sc->seconds, (float)sc->seconds);
+        } else {
+            arm_scene_timer();
         }
     }
     bsp_display_unlock();
@@ -3009,15 +3032,15 @@ static void alarm_check(void)
     if (s_alarm.magic != ALARM_MAGIC || s_alarm_frozen || alarm_left_us() > 0 || audio_is_recording()) {
         return;
     }
-    if (s_mode == M_SCENE && scene_get()->kind == CARD_TIMER && (s_timer_run || s_timer_done)) {
-        return;  // its own card is counting down, or already went off
+    if (s_flow == f_scene || (s_mode == M_SCENE && scene_get()->kind == CARD_TIMER && (s_timer_run || s_timer_done))) {
+        return;  // a card is starting, or the timer's own card is counting down or went off
     }
     // Any screen, the screen-off one on USB power included, but those the owner is in the middle of
     // (recording, pairing, typing a password, powering off) and the way into Standby, where firing
     // would be cut off by the sleep. The alarm waits for those (alarm_holds), or for the wake.
     bool busy = s_mode == M_BOOT || s_mode == M_BYE || s_mode == M_LISTEN || s_mode == M_SEND ||
                 s_mode == M_POWERHOLD || s_mode == M_PAIR || s_mode == M_SCAN || s_mode == M_KBD || s_mode == M_JOIN ||
-                (s_mode == M_OFF && s_bye_kind != UI_BYE_SCREEN_OFF);
+                (s_mode == M_OFF && s_bye_kind != UI_BYE_SCREEN_OFF) || s_bye_req >= 0 || s_flow == f_bye;
     if (busy) {
         return;
     }
@@ -3031,11 +3054,19 @@ static void alarm_check(void)
     }
     snprintf(json, sizeof json, "{\"mood\":\"surprised\",\"card\":{\"kind\":\"timer\",\"label\":\"%s\",\"seconds\":%d}}",
              label, (int)(s_alarm.seconds > 0 ? s_alarm.seconds : 1));
-    s_alarm.magic = 0;
+    // The alarm stays armed until Time's up has run (f_scene): a card replaced before that fires again.
     if (scene_load(json, strlen(json))) {
         s_scene_alarm = true;
+        s_scene_clip = 0;
         scene_show();
+    } else {
+        s_alarm.magic = 0;  // cannot be shown: never retried in a loop
     }
+}
+
+void ui_alarm_hold(bool hold)
+{
+    s_alarm_frozen = hold;
 }
 
 uint32_t ui_alarm_standby_s(void)
@@ -3638,7 +3669,7 @@ int ui_console(int argc, char **argv)
         return 1;
     }
     if (strcmp(argv[1], "scene") == 0) {
-        return scene_console(argc, argv, scene_show);  // takes the display lock itself
+        return scene_console(argc, argv, scene_console_show);  // takes the display lock itself
     }
     if (bsp_display_lock(1000) != ESP_OK) {
         printf("display busy\n");

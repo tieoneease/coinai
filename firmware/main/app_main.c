@@ -358,6 +358,7 @@ static void control_loop(lv_display_t *disp)
             case CTL_STANDBY:
                 standby_asap = true;
                 standby_req_us = esp_timer_get_time();
+                ui_alarm_hold(true);
                 if (!screen_off) {
                     ui_goodbye(UI_BYE_STANDBY);
                     display_set_brightness(0);
@@ -383,6 +384,9 @@ static void control_loop(lv_display_t *disp)
             last_reply_state = bs.reply_state;
             last_reply_clip = bs.reply_clip;
             s_last_activity_us = now;  // a reply arrived: give the user time to read it
+            if (standby_asap) {
+                ui_alarm_hold(false);
+            }
             standby_asap = false;
         }
         if (bs.pending > last_pending && !wake_clip_pending) {
@@ -403,6 +407,7 @@ static void control_loop(lv_display_t *disp)
         }
         if (standby_asap && idle_ms + 300 < (now - standby_req_us) / 1000) {
             standby_asap = false;  // touched or pressed again since the tap
+            ui_alarm_hold(false);
             if (screen_off && !audio_is_recording()) {
                 ui_screen_on();
                 display_set_brightness(settings_get(SET_BRIGHTNESS));
