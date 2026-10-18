@@ -132,7 +132,7 @@ A scene is the coin's answer as one card from a fixed catalog, drawn by the coin
 | `stat` | `value` ≤ 8, `unit` ≤ 4 (optional), `label` ≤ 40, `sub` ≤ 44 (optional) | one big number |
 | `list` | `title` ≤ 22, `items`: 1–5 of ≤ 18 | tap an item to tick it |
 | `steps` | `title` ≤ 26, `steps`: 2–6 of ≤ 80 | one step per page, tap for the next |
-| `timer` | `label` ≤ 22, `seconds` 1–86400 | counts down, tap to pause; it keeps running through Standby and the coin wakes when it ends |
+| `timer` | `label` ≤ 22, `seconds` 1–86400 | counts down, tap to pause; it keeps running through Standby and the coin wakes when it ends. If the owner is recording, pairing or typing then, it goes off right after |
 | `later` | `text` ≤ 40 | the task, with "SamBot is on it" under it |
 | `confirm` | `question` ≤ 60, `yes`, `no` ≤ 9 | reserved: drawn, but the choice cannot go back yet, so composers do not send it |
 

@@ -373,6 +373,7 @@ These move to `CONTEXT.md` or `docs/decisions/` once accepted.
 - How long exe.dev VM tokens stay valid is unknown.
 - ColorOS may stop the app in ways that stock Android does not.
 - The battery log can't measure Standby drain yet. Its `rtc_s` jumps by up to about ±50 minutes across deep-sleep wakes, probably because each boot rescales the whole RTC count with a fresh slow-clock calibration.
+- The UI clock (`s_now` in `ui.c`) is a `float` that grows by about 0.015 s a tick. After about 3 days awake its steps start to round away, and after about 12 days it stops, freezing every animation and a timer card's countdown. A coin on USB power never goes to Standby on its own, so it can stay up that long; a PWR tap restarts it. Found by reading the code in review (2026-10-18), not yet run or fixed.
 
 ## Open questions
 
