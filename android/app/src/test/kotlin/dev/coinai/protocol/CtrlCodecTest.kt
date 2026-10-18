@@ -60,6 +60,10 @@ class CtrlCodecTest {
             { CtrlMessage.CfgSet(CfgKey.REPLY_WAIT_S, -1) },
             { CtrlMessage.ListResult(false, List(35) { ClipEntry(it, 1, true) }) },
             { CtrlMessage.Status(87, false, false, false, 0, "v".repeat(33)) },
+            { CtrlMessage.Scene(1, 0, 0, ByteArray(1)) },
+            { CtrlMessage.Scene(1, 0, 9, ByteArray(1)) },
+            { CtrlMessage.Scene(1, 2, 2, ByteArray(1)) },
+            { CtrlMessage.Scene(1, 0, 1, ByteArray(238)) },
         )
         for (make in bad) {
             val msg = make()
@@ -118,6 +122,36 @@ class CtrlCodecTest {
         assertEquals("a".repeat(197), CtrlMessage.Reply.truncating(1, ReplyState.DONE, emoji).text)
         assertEquals(emoji, utf8Prefix(emoji, 201))
         assertEquals("short", CtrlMessage.Reply.truncating(1, ReplyState.DONE, "short").text)
+    }
+
+    @Test
+    fun sceneSplitsAtByteBoundariesUpToEightParts() {
+        val oneFull = "x".repeat(Protocol.MAX_SCENE_PART_BYTES)
+        assertEquals(1, CtrlMessage.Scene.split(3, oneFull).size)
+        assertEquals(Protocol.MAX_TLV_SIZE, CtrlMessage.Scene.split(3, oneFull).single().encode().size)
+        assertEquals(2, CtrlMessage.Scene.split(3, oneFull + "y").size)
+
+        // A 3-byte character across the cut is split between two parts and joins back whole.
+        val text = "a".repeat(236) + "\u2014" + "b"
+        val parts = CtrlMessage.Scene.split(65535, text)
+        assertEquals(listOf(237, 3), parts.map { it.json.size })
+        assertEquals(listOf(0 to 2, 1 to 2), parts.map { it.part to it.parts })
+        for (p in parts) assertEquals(p, CtrlMessage.decode(p.encode()))
+        assertEquals(text, String(parts[0].json + parts[1].json, Charsets.UTF_8))
+
+        val max = "z".repeat(Protocol.MAX_SCENE_PART_BYTES * Protocol.MAX_SCENE_PARTS)
+        assertEquals(8, CtrlMessage.Scene.split(1, max).size)
+        assertThrows(IllegalArgumentException::class.java) { CtrlMessage.Scene.split(1, max + "z") }
+        assertThrows(IllegalArgumentException::class.java) { CtrlMessage.Scene.split(1, "") }
+    }
+
+    @Test
+    fun statusBit3IsShowsScenes() {
+        val status = CtrlMessage.decode("81090040080100302e322e30".hexToBytes()) as CtrlMessage.Status
+        assertEquals(true, status.scenes)
+        assertEquals(false, status.charging || status.usbPower || status.recording)
+        val old = CtrlMessage.decode("81090057030200302e312e30".hexToBytes()) as CtrlMessage.Status
+        assertEquals(false, old.scenes)
     }
 
     @Test

@@ -69,6 +69,7 @@ import dev.coinai.clips.ClipRecord
 import dev.coinai.clips.ClipState
 import dev.coinai.clips.PlainText
 import dev.coinai.clips.ProcessingSettings
+import dev.coinai.clips.SceneSummary
 import dev.coinai.sambot.SambotClient
 import dev.coinai.settings.DeviceStatus
 import dev.coinai.settings.SambotSettings
@@ -246,6 +247,13 @@ private fun ClipState.label(): String = when (this) {
     ClipState.FAILED -> "Failed"
 }
 
+/** The state, with the scene's part in it (PROTOCOL.md "Scenes"). */
+private fun ClipRecord.label(): String = when {
+    handoff != null && (state == ClipState.TRANSCRIBED || state == ClipState.PROMPTED) -> "Handed to SamBot"
+    scene != null && handoff == null && state == ClipState.REPLIED -> "Answered on the coin"
+    else -> state.label()
+}
+
 @Composable
 private fun ClipRow(app: CoinaiApp, clip: ClipRecord, player: ClipPlayer) {
     val scope = rememberCoroutineScope()
@@ -253,7 +261,7 @@ private fun ClipRow(app: CoinaiApp, clip: ClipRecord, player: ClipPlayer) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "#${clip.clipId} · ${clip.state.label()}",
+                    "#${clip.clipId} · ${clip.label()}",
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.weight(1f),
                 )
@@ -267,6 +275,10 @@ private fun ClipRow(app: CoinaiApp, clip: ClipRecord, player: ClipPlayer) {
                 )
             }
             clip.transcript?.takeIf { it.isNotBlank() }?.let { Text("“$it”") }
+            if (clip.handoff != null) {
+                val task = clip.scene?.let(SceneSummary::laterText)?.takeIf { it.isNotBlank() } ?: clip.handoff
+                Text("Handed to SamBot: $task", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             clip.reply?.let { Text(PlainText.fromMarkdown(it), maxLines = 6) }
             clip.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
