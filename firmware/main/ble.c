@@ -549,7 +549,11 @@ void ble_set_scene_handler(ble_scene_fn fn)
 
 bool ble_show_scene(uint16_t clip, const char *json, size_t len)
 {
-    return s_scene_fn && s_scene_fn(clip, json, len);
+    bool shown = s_scene_fn && s_scene_fn(clip, json, len);
+    if (shown) {
+        set_reply_window(false);  // rule 7, as for a SCENE from the phone
+    }
+    return shown;
 }
 
 static void handle_scene(const uint8_t *v, uint16_t len)

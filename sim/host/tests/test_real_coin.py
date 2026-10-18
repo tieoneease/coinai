@@ -184,6 +184,28 @@ def test_scene_timer_through_standby(rig):
     assert ui_mode(api) == 'scene'
 
 
+def test_scene_timer_with_the_screen_off_on_usb(rig):
+    """On USB power the idle timeout turns the screen off instead; the timer still goes off and turns it back on, and
+    once unplugged the coin goes to Standby (a missed alarm once kept it awake for good). About 80 s."""
+    phone_port, api, tmp = rig
+    post(f'{api}/api/input', {'usb': True})
+    post(f'{api}/api/console', {'line': 'ble inject 060300030500'})  # CFG_SET idle_timeout_s 5
+    timer = json.dumps({'say': 'On it.', 'mood': 'focus', 'card': {'kind': 'timer', 'label': 'Pasta', 'seconds': 68}})
+    seq = console_seq(api)
+    t0 = time.monotonic()
+    post(f'{api}/api/console', {'line': 'ble inject ' + tlv.scene(5, timer)[0].hex()})
+    wait_line(api, seq, r'SCENE clip 5: \d+ bytes, shown')
+    wait_line(api, seq, r'idle on USB power: screen off', timeout=20)
+    wait(lambda: get(f'{api}/api/state')['panel']['brightness'] == 0, 5, what='panel dark')
+    wait_line(api, seq, r'SCENE-ACTION timer done', timeout=80)
+    assert 67 < time.monotonic() - t0 < 72
+    wait(lambda: get(f'{api}/api/state')['panel']['brightness'] > 0, 5, what='panel lit again')
+    assert ui_mode(api) == 'scene'
+
+    post(f'{api}/api/input', {'usb': False})
+    wait_line(api, seq, r'standby: timer 0 s', timeout=20)
+
+
 # The on-screen keyboard's keys (firmware/main/kbd.c): row centres and the first key's left edge.
 KEY_ROWS = {0: (190, 20, 'qwertyuiop', '1234567890'), 1: (240, 42, 'asdfghjkl', '-/:;()$&@"'),
             2: (290, 85, 'zxcvbnm', '.,?!\'')}

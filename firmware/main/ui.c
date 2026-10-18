@@ -2645,6 +2645,7 @@ static bool s_timer_run, s_timer_done;
 // ALARM_EARLY_US before it: about what a wake takes to draw the screen.
 #define ALARM_MAGIC 0x414C524Du
 #define ALARM_AWAKE_S 60
+#define ALARM_GRACE_S 60  // past the end, while a busy screen holds the alarm off (alarm_check)
 #define ALARM_EARLY_US 2500000
 static RTC_DATA_ATTR struct {
     uint32_t magic;
@@ -2653,6 +2654,7 @@ static RTC_DATA_ATTR struct {
     char label[24];
 } s_alarm;
 static bool s_scene_alarm;  // the scene being shown is the alarm going off
+static bool s_alarm_frozen;  // the coin is going to Standby: the alarm waits for the wake (ui_alarm_standby_s)
 
 static uint64_t us_to_ticks(int64_t us)
 {
@@ -2663,6 +2665,18 @@ static uint64_t us_to_ticks(int64_t us)
 static int64_t alarm_left_us(void)
 {
     return power_ticks_to_us(power_rtc_ticks(), s_alarm.end_ticks);
+}
+
+// The coin stays awake for a timer's last ALARM_AWAKE_S and up to ALARM_GRACE_S past its end. An
+// alarm still not gone off by then waits for the next wake: Standby wakes at once for it
+// (ui_alarm_standby_s), so it can never keep the coin from sleeping.
+static bool alarm_holds(void)
+{
+    if (s_alarm.magic != ALARM_MAGIC) {
+        return false;
+    }
+    int64_t left = alarm_left_us();
+    return left <= ALARM_AWAKE_S * 1000000LL && left > -ALARM_GRACE_S * 1000000LL;
 }
 
 static void alarm_arm(const char *label, int32_t seconds, float left_s)
@@ -2956,6 +2970,9 @@ static void scene_tap(int x, int y)
 static bool scene_show(void)
 {
     FLOW(f_scene);
+    // The mode now, not at the flow's first step on the next tick: the reply window closing with the
+    // scene must not send the screen back to the face meanwhile (M_THINK in react).
+    s_mode = M_SCENE;
     lv_display_trigger_activity(NULL);
     return true;
 }
@@ -2973,9 +2990,13 @@ bool ui_show_scene(uint16_t clip, const char *json, size_t len)
         recent_push(clip, 2, line);
     }
     if (ok) {
-        // A recording started since keeps its screen; the card is in the recent list.
+        // A recording started since keeps its screen; the card is in the recent list, and a timer
+        // still runs: its alarm goes off when it ends.
+        const scene_t *sc = scene_get();
         if (!audio_is_recording() && s_mode != M_LISTEN && s_mode != M_POWERHOLD) {
             scene_show();
+        } else if (sc->kind == CARD_TIMER && sc->seconds > 0) {
+            alarm_arm(sc->n_lines ? sc->lines[0].text : "Timer", sc->seconds, (float)sc->seconds);
         }
     }
     bsp_display_unlock();
@@ -2985,15 +3006,19 @@ bool ui_show_scene(uint16_t clip, const char *json, size_t len)
 // Under the display lock (tick_cb): a timer whose card is gone (another scene, a wake) goes off.
 static void alarm_check(void)
 {
-    if (s_alarm.magic != ALARM_MAGIC || alarm_left_us() > 0 || audio_is_recording()) {
+    if (s_alarm.magic != ALARM_MAGIC || s_alarm_frozen || alarm_left_us() > 0 || audio_is_recording()) {
         return;
     }
     if (s_mode == M_SCENE && scene_get()->kind == CARD_TIMER && (s_timer_run || s_timer_done)) {
         return;  // its own card is counting down, or already went off
     }
-    bool calm = s_mode == M_FACE || s_mode == M_DROWSY || s_mode == M_SCENE ||
-                (is_content(s_mode) && s_mode <= M_DETAIL && s_mode != M_PAIRED && s_mode != M_PAIRFAIL);
-    if (!calm) {
+    // Any screen, the screen-off one on USB power included, but those the owner is in the middle of
+    // (recording, pairing, typing a password, powering off) and the way into Standby, where firing
+    // would be cut off by the sleep. The alarm waits for those (alarm_holds), or for the wake.
+    bool busy = s_mode == M_BOOT || s_mode == M_BYE || s_mode == M_LISTEN || s_mode == M_SEND ||
+                s_mode == M_POWERHOLD || s_mode == M_PAIR || s_mode == M_SCAN || s_mode == M_KBD || s_mode == M_JOIN ||
+                (s_mode == M_OFF && s_bye_kind != UI_BYE_SCREEN_OFF);
+    if (busy) {
         return;
     }
     char json[160];
@@ -3015,6 +3040,7 @@ static void alarm_check(void)
 
 uint32_t ui_alarm_standby_s(void)
 {
+    s_alarm_frozen = true;  // called as the coin goes to Standby; RAM starts afresh on the wake
     if (s_alarm.magic != ALARM_MAGIC) {
         return 0;
     }
@@ -3590,7 +3616,7 @@ void ui_screen_on(void)
 
 bool ui_keep_awake(void)
 {
-    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD || (s_alarm.magic == ALARM_MAGIC && alarm_left_us() <= ALARM_AWAKE_S * 1000000LL) ||
+    return s_demo != DEMO_NONE || s_hold_down || s_mode == M_POWERHOLD || alarm_holds() ||
            ((s_mode == M_SCAN || s_mode == M_JOIN) && net_ui_busy());
 }
 
